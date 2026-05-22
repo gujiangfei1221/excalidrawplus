@@ -17,10 +17,12 @@ import { FileListSidebar } from "./components/FileListSidebar";
 import { SyncStatusIndicator } from "./components/SyncStatusIndicator";
 import { createDebouncedSave, saveBeforeSwitch } from "./autosave";
 import { cloudSyncBridge, listenToCloudSyncEvent } from "./tauri-bridge";
-import type { CosConfig, FileEntry, SyncStatus } from "./types";
+
 import { countConflictCopies } from "./utils";
 
 import "./cloud-sync.scss";
+
+import type { CosConfig, FileEntry, SyncStatus } from "./types";
 
 const EMPTY_CANVAS = {
   type: "excalidraw",
@@ -62,12 +64,42 @@ const CloudSyncEditor = ({
   const [error, setError] = useState("");
   const hasUnsavedChangesRef = useRef(false);
   const latestCanvasRef = useRef(JSON.stringify(EMPTY_CANVAS));
+  const fallbackFilePromiseRef = useRef<Promise<FileEntry> | null>(null);
 
   const refreshFiles = useCallback(async () => {
     const nextFiles = await cloudSyncBridge.getFileList();
     setFiles(nextFiles);
     return nextFiles;
   }, []);
+
+  const createFallbackFile = useCallback(() => {
+    if (!fallbackFilePromiseRef.current) {
+      fallbackFilePromiseRef.current = cloudSyncBridge
+        .createNewFile()
+        .finally(() => {
+          fallbackFilePromiseRef.current = null;
+        });
+    }
+
+    return fallbackFilePromiseRef.current;
+  }, []);
+
+  const ensureFileListHasFile = useCallback(
+    async (currentFiles?: FileEntry[]) => {
+      const loadedFiles = currentFiles ?? (await refreshFiles());
+
+      if (loadedFiles.length > 0) {
+        return loadedFiles;
+      }
+
+      const created = await createFallbackFile();
+      setFiles((files) =>
+        files.some((file) => file.id === created.id) ? files : [created],
+      );
+      return [created];
+    },
+    [createFallbackFile, refreshFiles],
+  );
 
   const saveActiveCanvas = useCallback(async () => {
     if (!activeFileId) {
@@ -95,17 +127,11 @@ const CloudSyncEditor = ({
   useEffect(() => {
     refreshFiles()
       .then(async (loadedFiles) => {
-        if (loadedFiles.length > 0) {
-          setActiveFileId(loadedFiles[0].id);
-          return;
-        }
-
-        const created = await cloudSyncBridge.createNewFile();
-        setFiles([created]);
-        setActiveFileId(created.id);
+        const availableFiles = await ensureFileListHasFile(loadedFiles);
+        setActiveFileId((current) => current ?? availableFiles[0]?.id ?? null);
       })
       .catch((err: Error) => setError(err.message));
-  }, [refreshFiles]);
+  }, [ensureFileListHasFile, refreshFiles]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -206,17 +232,16 @@ const CloudSyncEditor = ({
   };
 
   const deleteFile = async (fileId: string) => {
+    if (fileId === activeFileId) {
+      debouncedSave.flush();
+      hasUnsavedChangesRef.current = false;
+    }
+
     await cloudSyncBridge.deleteFile(fileId);
     const nextFiles = await refreshFiles();
     if (fileId === activeFileId) {
-      if (nextFiles[0]) {
-        setActiveFileId(nextFiles[0].id);
-        return;
-      }
-
-      const created = await cloudSyncBridge.createNewFile();
-      setFiles([created]);
-      setActiveFileId(created.id);
+      const availableFiles = await ensureFileListHasFile(nextFiles);
+      setActiveFileId(availableFiles[0]?.id ?? null);
     }
   };
 
