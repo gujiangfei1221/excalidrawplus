@@ -45,6 +45,8 @@ const MAX_CONFLICT_COPIES: usize = 5;
 /// Holds references to all backend components and manages background
 /// tasks for manifest polling and upload queue processing.
 pub struct SyncEngine {
+    /// Whether COS-backed synchronization is enabled for this runtime.
+    cloud_sync_enabled: bool,
     /// S3-compatible client for Tencent COS operations.
     pub(crate) cos_client: Arc<CosClient>,
     /// SQLite database for metadata and queue persistence.
@@ -71,6 +73,7 @@ impl SyncEngine {
         conn_monitor: ConnectivityMonitor,
     ) -> Self {
         Self {
+            cloud_sync_enabled: true,
             cos_client: Arc::new(cos_client),
             db: Arc::new(db),
             file_store: Arc::new(file_store),
@@ -92,6 +95,10 @@ impl SyncEngine {
     ///
     /// Validates: Requirements 3.1 (auto-save trigger path), 6.6 (manifest polling).
     pub fn start(&mut self, _app_handle: AppHandle) {
+        if !self.cloud_sync_enabled {
+            return;
+        }
+
         // Start connectivity monitoring.
         self.conn_monitor.start();
 
@@ -144,6 +151,73 @@ impl SyncEngine {
         self.queue_handle = Some(queue_handle);
     }
 
+    pub fn is_cloud_sync_enabled(&self) -> bool {
+        self.cloud_sync_enabled
+    }
+
+    pub fn set_cloud_sync_enabled(&mut self, enabled: bool) {
+        self.cloud_sync_enabled = enabled;
+    }
+
+    pub fn enable_cloud_sync(
+        &mut self,
+        cos_client: CosClient,
+        app_handle: AppHandle,
+    ) -> Result<(), String> {
+        self.stop();
+
+        let cos_client = Arc::new(cos_client);
+        self.cos_client = Arc::clone(&cos_client);
+        self.conn_monitor = Arc::new(ConnectivityMonitor::new(cos_client));
+        self.cloud_sync_enabled = true;
+        self.enqueue_local_files_for_sync()?;
+        self.start(app_handle);
+
+        Ok(())
+    }
+
+    fn enqueue_local_files_for_sync(&self) -> Result<(), String> {
+        use crate::models::{QueuedUpload, UploadOperation};
+
+        let files = self
+            .db
+            .get_all_files()
+            .map_err(|e| format!("Failed to get local files for sync: {e}"))?;
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        for mut meta in files {
+            if meta.deleted {
+                continue;
+            }
+
+            meta.cos_object_key = Some(format!("files/{}.excalidraw", meta.id));
+            meta.sync_status = SyncStatus::PendingSync;
+            meta.base_content_hash = None;
+
+            self.db
+                .upsert_file_meta(&meta)
+                .map_err(|e| format!("Failed to mark file for cloud sync: {e}"))?;
+
+            self.db
+                .enqueue_upload(&QueuedUpload {
+                    id: 0,
+                    file_id: meta.id,
+                    operation: UploadOperation::Upload,
+                    payload: None,
+                    retry_count: 0,
+                    max_retries: 5,
+                    created_at: now_ms,
+                })
+                .map_err(|e| format!("Failed to enqueue file for cloud sync: {e}"))?;
+        }
+
+        Ok(())
+    }
+
     /// Save canvas data to local storage, update metadata, and enqueue upload.
     ///
     /// This method is the save path that executes AFTER the debounce timer
@@ -181,7 +255,12 @@ impl SyncEngine {
             .get_file_meta(file_id)
             .map_err(|e| format!("Failed to read file metadata: {}", e))?;
 
-        let cos_object_key = format!("files/{}.excalidraw", file_id);
+        let content_is_synced_locally = !self.cloud_sync_enabled;
+        let cos_object_key = if self.cloud_sync_enabled {
+            Some(format!("files/{}.excalidraw", file_id))
+        } else {
+            existing.as_ref().and_then(|m| m.cos_object_key.clone())
+        };
 
         let meta = FileMeta {
             id: file_id.to_string(),
@@ -191,10 +270,21 @@ impl SyncEngine {
                 .unwrap_or_else(|| "Untitled".to_string()),
             last_modified: now_ms,
             content_hash: content_hash.clone(),
-            cos_object_key: Some(cos_object_key),
-            sync_status: SyncStatus::PendingSync,
-            base_content_hash: existing.as_ref().and_then(|m| m.base_content_hash.clone()),
-            is_conflict_copy: existing.as_ref().map(|m| m.is_conflict_copy).unwrap_or(false),
+            cos_object_key,
+            sync_status: if self.cloud_sync_enabled {
+                SyncStatus::PendingSync
+            } else {
+                SyncStatus::Synced
+            },
+            base_content_hash: if content_is_synced_locally {
+                Some(content_hash)
+            } else {
+                existing.as_ref().and_then(|m| m.base_content_hash.clone())
+            },
+            is_conflict_copy: existing
+                .as_ref()
+                .map(|m| m.is_conflict_copy)
+                .unwrap_or(false),
             parent_file_id: existing.as_ref().and_then(|m| m.parent_file_id.clone()),
             deleted: false,
             created_at: existing.as_ref().map(|m| m.created_at).unwrap_or(now_ms),
@@ -204,23 +294,28 @@ impl SyncEngine {
             .upsert_file_meta(&meta)
             .map_err(|e| format!("Failed to update file metadata: {}", e))?;
 
-        // 5. Enqueue upload operation.
-        let upload_entry = QueuedUpload {
-            id: 0, // ignored on insert — SQLite auto-increments
-            file_id: file_id.to_string(),
-            operation: UploadOperation::Upload,
-            payload: None,
-            retry_count: 0,
-            max_retries: 5,
-            created_at: now_ms,
-        };
+        if self.cloud_sync_enabled {
+            let upload_entry = QueuedUpload {
+                id: 0, // ignored on insert — SQLite auto-increments
+                file_id: file_id.to_string(),
+                operation: UploadOperation::Upload,
+                payload: None,
+                retry_count: 0,
+                max_retries: 5,
+                created_at: now_ms,
+            };
 
-        self.db
-            .enqueue_upload(&upload_entry)
-            .map_err(|e| format!("Failed to enqueue upload: {}", e))?;
+            self.db
+                .enqueue_upload(&upload_entry)
+                .map_err(|e| format!("Failed to enqueue upload: {}", e))?;
+        }
 
         // 6. Return current sync status.
-        Ok(SyncStatus::PendingSync)
+        if self.cloud_sync_enabled {
+            Ok(SyncStatus::PendingSync)
+        } else {
+            Ok(SyncStatus::Synced)
+        }
     }
 
     /// Upload a file to COS with retry tracking.
@@ -241,6 +336,10 @@ impl SyncEngine {
     /// Validates: Requirements 3.2, 3.5, 3.6, 3.8.
     pub async fn upload_file(&self, file_id: &str) -> Result<SyncStatus, String> {
         use crate::models::SyncStatus;
+
+        if !self.cloud_sync_enabled {
+            return Ok(SyncStatus::PendingSync);
+        }
 
         // 1. Check connectivity — if offline, return early with PendingSync.
         if !self.conn_monitor.is_online() {
@@ -355,6 +454,13 @@ impl SyncEngine {
             .map_err(|e| format!("Failed to get file metadata for {}: {}", file_id, e))?
             .ok_or_else(|| format!("File not found in database: {}", file_id))?;
 
+        if !self.cloud_sync_enabled {
+            return self
+                .file_store
+                .read_canvas(file_id)
+                .map_err(|e| format!("Failed to read local file {}: {}", file_id, e));
+        }
+
         // 2. Try to read the local file.
         let local_content = self.file_store.read_canvas(file_id);
 
@@ -412,7 +518,12 @@ impl SyncEngine {
         // Save to local store.
         self.file_store
             .write_canvas(file_id, &content)
-            .map_err(|e| format!("Failed to write downloaded file {} to local store: {}", file_id, e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to write downloaded file {} to local store: {}",
+                    file_id, e
+                )
+            })?;
 
         // Update metadata with new content hash and mark as synced.
         let new_hash = compute_content_hash(&content);
@@ -421,9 +532,12 @@ impl SyncEngine {
         updated_meta.base_content_hash = Some(new_hash);
         updated_meta.sync_status = SyncStatus::Synced;
 
-        self.db
-            .upsert_file_meta(&updated_meta)
-            .map_err(|e| format!("Failed to update metadata after download for {}: {}", file_id, e))?;
+        self.db.upsert_file_meta(&updated_meta).map_err(|e| {
+            format!(
+                "Failed to update metadata after download for {}: {}",
+                file_id, e
+            )
+        })?;
 
         Ok(content)
     }
@@ -499,6 +613,10 @@ impl SyncEngine {
     ///
     /// Validates: Requirements 7.4, 7.5
     pub async fn process_upload_queue(&self) -> Result<(), String> {
+        if !self.cloud_sync_enabled {
+            return Ok(());
+        }
+
         // 1. Check connectivity — if offline, return early.
         if !self.conn_monitor.is_online() {
             return Ok(());
@@ -555,23 +673,15 @@ impl SyncEngine {
             .as_deref()
             .ok_or_else(|| format!("File {} has no COS object key", conflict.file_id))?;
 
-        let remote_bytes = self
-            .cos_client
-            .get_object(object_key)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to download remote version of {}: {}",
-                    conflict.file_id, e
-                )
-            })?;
-
-        let remote_content = String::from_utf8(remote_bytes).map_err(|e| {
+        let remote_bytes = self.cos_client.get_object(object_key).await.map_err(|e| {
             format!(
-                "Remote file {} is not valid UTF-8: {}",
+                "Failed to download remote version of {}: {}",
                 conflict.file_id, e
             )
         })?;
+
+        let remote_content = String::from_utf8(remote_bytes)
+            .map_err(|e| format!("Remote file {} is not valid UTF-8: {}", conflict.file_id, e))?;
 
         // 3. Generate a conflict copy ID (UUID v4).
         let conflict_copy_id = uuid::Uuid::new_v4().to_string();
@@ -658,14 +768,12 @@ impl SyncEngine {
         updated_original.base_content_hash = Some(original_meta.content_hash.clone());
         updated_original.sync_status = SyncStatus::Synced;
 
-        self.db
-            .upsert_file_meta(&updated_original)
-            .map_err(|e| {
-                format!(
-                    "Failed to update original file metadata after conflict resolution: {}",
-                    e
-                )
-            })?;
+        self.db.upsert_file_meta(&updated_original).map_err(|e| {
+            format!(
+                "Failed to update original file metadata after conflict resolution: {}",
+                e
+            )
+        })?;
 
         Ok(())
     }
@@ -701,16 +809,17 @@ impl SyncEngine {
     ///
     /// Validates: Requirements 6.1, 6.3, 6.4
     pub async fn sync_manifest(&self) -> Result<(), String> {
+        if !self.cloud_sync_enabled {
+            return Ok(());
+        }
+
         const MAX_RETRIES: u32 = 3;
 
         for attempt in 0..MAX_RETRIES {
             // Step 1: Download the current manifest from COS (or create empty if not found).
             let remote_manifest = match self.cos_client.get_object("manifest.json").await {
-                Ok(bytes) => {
-                    serde_json::from_slice::<Manifest>(&bytes).map_err(|e| {
-                        format!("Failed to deserialize manifest.json: {e}")
-                    })?
-                }
+                Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
+                    .map_err(|e| format!("Failed to deserialize manifest.json: {e}"))?,
                 Err(e) => {
                     // If the manifest doesn't exist (first sync), start with an empty one.
                     if e.contains("NoSuchKey") || e.contains("not found") || e.contains("404") {
@@ -741,7 +850,11 @@ impl SyncEngine {
             let manifest_json = serde_json::to_vec_pretty(&merged)
                 .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
 
-            match self.cos_client.put_object("manifest.json", manifest_json).await {
+            match self
+                .cos_client
+                .put_object("manifest.json", manifest_json)
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     // On upload failure (potential concurrent modification),
@@ -771,10 +884,8 @@ impl SyncEngine {
         local_files: &[FileMeta],
         remote: &Manifest,
     ) -> Result<(), String> {
-        let local_map: HashMap<&str, &FileMeta> = local_files
-            .iter()
-            .map(|f| (f.id.as_str(), f))
-            .collect();
+        let local_map: HashMap<&str, &FileMeta> =
+            local_files.iter().map(|f| (f.id.as_str(), f)).collect();
 
         for entry in &remote.files {
             if entry.deleted {
@@ -824,7 +935,10 @@ pub(crate) fn generate_conflict_title(original_title: &str) -> String {
     let days_since_epoch = secs / 86400;
     let (year, month, day) = days_to_ymd(days_since_epoch);
 
-    format!("{} - Conflict {:04}-{:02}-{:02}", original_title, year, month, day)
+    format!(
+        "{} - Conflict {:04}-{:02}-{:02}",
+        original_title, year, month, day
+    )
 }
 
 /// Generate a conflict copy title with a specific date string.
@@ -935,19 +1049,14 @@ pub(crate) fn merge_manifests(local_files: &[FileMeta], remote: &Manifest) -> Ma
 /// 5. Upload the merged manifest back to COS (with retry on concurrent modification).
 ///
 /// Validates: Requirements 6.5, 6.6, 6.7
-async fn poll_sync_manifest(
-    cos_client: &Arc<CosClient>,
-    db: &Arc<Database>,
-) -> Result<(), String> {
+async fn poll_sync_manifest(cos_client: &Arc<CosClient>, db: &Arc<Database>) -> Result<(), String> {
     const MAX_RETRIES: u32 = 3;
 
     for attempt in 0..MAX_RETRIES {
         // Step 1: Download the current manifest from COS (or create empty if not found).
         let remote_manifest = match cos_client.get_object("manifest.json").await {
-            Ok(bytes) => {
-                serde_json::from_slice::<Manifest>(&bytes)
-                    .map_err(|e| format!("Failed to deserialize manifest.json: {e}"))?
-            }
+            Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
+                .map_err(|e| format!("Failed to deserialize manifest.json: {e}"))?,
             Err(e) => {
                 // If the manifest doesn't exist (first sync), start with an empty one.
                 if e.contains("NoSuchKey") || e.contains("not found") || e.contains("404") {
@@ -1014,10 +1123,8 @@ fn apply_remote_changes_standalone(
     local_files: &[FileMeta],
     remote: &Manifest,
 ) -> Result<(), String> {
-    let local_map: HashMap<&str, &FileMeta> = local_files
-        .iter()
-        .map(|f| (f.id.as_str(), f))
-        .collect();
+    let local_map: HashMap<&str, &FileMeta> =
+        local_files.iter().map(|f| (f.id.as_str(), f)).collect();
 
     for entry in &remote.files {
         if entry.deleted {
@@ -1134,7 +1241,10 @@ async fn process_upload_queue_standalone(
         };
 
         // Attempt to upload via COS.
-        match cos_client.put_object(&object_key, content.into_bytes()).await {
+        match cos_client
+            .put_object(&object_key, content.into_bytes())
+            .await
+        {
             Ok(()) => {
                 // Success: update sync_status to Synced.
                 let mut updated_meta = meta.clone();
@@ -1272,8 +1382,14 @@ mod tests {
         // Verify file metadata was persisted in SQLite.
         let meta = engine.db.get_file_meta(file_id).unwrap().unwrap();
         assert_eq!(meta.id, file_id);
-        assert_eq!(meta.content_hash, crate::file_store::compute_content_hash(data));
-        assert_eq!(meta.cos_object_key, Some(format!("files/{}.excalidraw", file_id)));
+        assert_eq!(
+            meta.content_hash,
+            crate::file_store::compute_content_hash(data)
+        );
+        assert_eq!(
+            meta.cos_object_key,
+            Some(format!("files/{}.excalidraw", file_id))
+        );
         assert_eq!(meta.sync_status, crate::models::SyncStatus::PendingSync);
         assert_eq!(meta.title, "Untitled");
         assert!(!meta.deleted);
@@ -1282,6 +1398,26 @@ mod tests {
         let uploads = engine.db.get_pending_uploads().unwrap();
         assert_eq!(uploads.len(), 1);
         assert_eq!(uploads[0].file_id, file_id);
+    }
+
+    #[tokio::test]
+    async fn save_canvas_local_only_does_not_enqueue_upload() {
+        let mut engine = create_test_engine();
+        engine.set_cloud_sync_enabled(false);
+        let file_id = "test-save-local-only";
+        let data = r#"{"type":"excalidraw","version":2,"elements":[]}"#;
+
+        let status = engine.save_canvas(file_id, data).await.unwrap();
+
+        assert_eq!(status, crate::models::SyncStatus::Synced);
+        let meta = engine.db.get_file_meta(file_id).unwrap().unwrap();
+        assert_eq!(meta.cos_object_key, None);
+        assert_eq!(meta.sync_status, crate::models::SyncStatus::Synced);
+        assert_eq!(
+            meta.base_content_hash,
+            Some(crate::file_store::compute_content_hash(data)),
+        );
+        assert!(engine.db.get_pending_uploads().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1317,7 +1453,10 @@ mod tests {
         // created_at should be preserved.
         assert_eq!(meta.created_at, 1_700_000_000_000);
         // content_hash should be updated.
-        assert_eq!(meta.content_hash, crate::file_store::compute_content_hash(new_data));
+        assert_eq!(
+            meta.content_hash,
+            crate::file_store::compute_content_hash(new_data)
+        );
         // last_modified should be recent (not the old value).
         assert!(meta.last_modified > 1_700_000_000_000);
     }
@@ -1494,11 +1633,8 @@ mod tests {
 
         assert_eq!(result.files.len(), 3);
 
-        let file_map: HashMap<&str, &ManifestEntry> = result
-            .files
-            .iter()
-            .map(|e| (e.id.as_str(), e))
-            .collect();
+        let file_map: HashMap<&str, &ManifestEntry> =
+            result.files.iter().map(|e| (e.id.as_str(), e)).collect();
 
         // "shared" should use local (newer timestamp 5000 > 3000)
         assert_eq!(file_map["shared"].content_hash, "local-hash");
@@ -1559,11 +1695,8 @@ mod tests {
 
         let result = merge_manifests(&local, &remote);
 
-        let file_map: HashMap<&str, &ManifestEntry> = result
-            .files
-            .iter()
-            .map(|e| (e.id.as_str(), e))
-            .collect();
+        let file_map: HashMap<&str, &ManifestEntry> =
+            result.files.iter().map(|e| (e.id.as_str(), e)).collect();
 
         assert_eq!(file_map["with-key"].object_key, "custom/path.excalidraw");
         assert_eq!(file_map["no-key"].object_key, "files/no-key.excalidraw");

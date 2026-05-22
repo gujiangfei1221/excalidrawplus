@@ -5,6 +5,7 @@ import { listenToCloudSyncEvent } from "../tauri-bridge";
 
 const STATUS_TEXT: Record<SyncStatus, string> = {
   idle: "Idle",
+  "local-only": "Local only",
   saving: "Saving",
   synced: "Synced",
   "pending-sync": "Pending sync",

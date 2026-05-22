@@ -33,6 +33,12 @@
   justify-content: space-between;
 }
 
+.cloud-sync-sidebar__actions,
+.cloud-sync-config__actions {
+  display: flex;
+  gap: 8px;
+}
+
 .cloud-sync-sidebar button,
 .cloud-sync-config button,
 .cloud-sync-file input {
@@ -165,6 +171,10 @@
   background: #1a7f37;
 }
 
+.cloud-sync-status.is-local-only .cloud-sync-status__dot {
+  background: #6e7781;
+}
+
 .cloud-sync-status.is-pending-sync .cloud-sync-status__dot,
 .cloud-sync-status.is-error .cloud-sync-status__dot {
   background: #cf222e;
@@ -188,6 +198,23 @@
   border-radius: 8px;
   background: #ffffff;
   padding: 20px;
+}
+
+.cloud-sync-settings {
+  position: fixed;
+  z-index: 10;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(31 35 40 / 30%);
+}
+
+.cloud-sync-settings .cloud-sync-config {
+  box-shadow: 0 16px 48px rgb(31 35 40 / 18%);
+}
+
+.cloud-sync-config__actions {
+  justify-content: flex-end;
 }
 
 .cloud-sync-config h1 {

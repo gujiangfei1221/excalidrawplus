@@ -17,12 +17,17 @@ const STATUS_LABEL: Record<FileEntry["syncStatus"], string> = {
 export const FileListSidebar = ({
   files,
   activeFileId,
+  isCloudSyncEnabled = true,
+  onOpenSettings,
   onFileSelect,
   onFileRename,
   onFileDelete,
   onNewFile,
 }: FileListSidebarProps) => {
-  const sortedFiles = useMemo(() => sortFilesByLastModifiedDesc(files), [files]);
+  const sortedFiles = useMemo(
+    () => sortFilesByLastModifiedDesc(files),
+    [files],
+  );
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
   const [error, setError] = useState("");
@@ -51,9 +56,21 @@ export const FileListSidebar = ({
     <aside className="cloud-sync-sidebar">
       <div className="cloud-sync-sidebar__header">
         <strong>Files</strong>
-        <button aria-label="New file" onClick={onNewFile} title="New file">
-          +
-        </button>
+        <div className="cloud-sync-sidebar__actions">
+          {onOpenSettings && (
+            <button
+              aria-label="Cloud sync settings"
+              onClick={onOpenSettings}
+              title="Cloud sync settings"
+              type="button"
+            >
+              Sync
+            </button>
+          )}
+          <button aria-label="New file" onClick={onNewFile} title="New file">
+            +
+          </button>
+        </div>
       </div>
       {error && (
         <p className="cloud-sync-error" role="alert">
@@ -80,14 +97,26 @@ export const FileListSidebar = ({
               >
                 <span
                   aria-label={
-                    file.isConflictCopy ? "Conflict copy" : file.syncStatus
+                    file.isConflictCopy
+                      ? "Conflict copy"
+                      : isCloudSyncEnabled
+                      ? file.syncStatus
+                      : "Local only"
                   }
                   className="cloud-sync-file__status"
                   title={
-                    file.isConflictCopy ? "Conflict copy" : file.syncStatus
+                    file.isConflictCopy
+                      ? "Conflict copy"
+                      : isCloudSyncEnabled
+                      ? file.syncStatus
+                      : "Local only"
                   }
                 >
-                  {file.isConflictCopy ? "C" : STATUS_LABEL[file.syncStatus]}
+                  {file.isConflictCopy
+                    ? "C"
+                    : isCloudSyncEnabled
+                    ? STATUS_LABEL[file.syncStatus]
+                    : "L"}
                 </span>
                 <span className="cloud-sync-file__text">
                   {isEditing ? (

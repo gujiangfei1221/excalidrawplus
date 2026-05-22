@@ -36,9 +36,7 @@ use tokio::time::{timeout, Duration};
 
 use crate::cos_client::CosClient;
 use crate::file_store::compute_content_hash;
-use crate::models::{
-    CosConfig, FileMeta, QueuedUpload, SyncStatus, UploadOperation,
-};
+use crate::models::{CosConfig, FileMeta, QueuedUpload, SyncStatus, UploadOperation};
 use crate::sync_engine::SyncEngine;
 
 /// Application state managed by Tauri's state system.
@@ -78,6 +76,7 @@ pub(crate) fn validate_file_title(title: &str) -> Result<(), String> {
 #[tauri::command]
 pub async fn save_cos_config(
     config: CosConfig,
+    app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     // Validate that all fields are non-empty
@@ -94,11 +93,14 @@ pub async fn save_cos_config(
         return Err("Region must not be empty".to_string());
     }
 
-    let engine = state.sync_engine.lock().await;
+    let cos_client = CosClient::new(&config)?;
+
+    let mut engine = state.sync_engine.lock().await;
     engine
         .db
         .save_cos_config(&config)
         .map_err(|e| format!("Failed to save COS config: {e}"))?;
+    engine.enable_cloud_sync(cos_client, app_handle)?;
 
     Ok(())
 }
@@ -136,9 +138,9 @@ pub async fn validate_cos_config(config: CosConfig) -> Result<bool, String> {
     match result {
         Ok(Ok(success)) => Ok(success),
         Ok(Err(e)) => Err(format!("COS connection validation failed: {e}")),
-        Err(_) => Err(
-            "COS connection validation timed out: no response within 10 seconds".to_string(),
-        ),
+        Err(_) => {
+            Err("COS connection validation timed out: no response within 10 seconds".to_string())
+        }
     }
 }
 
@@ -234,23 +236,35 @@ pub async fn create_new_file(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    let cos_object_key = format!("files/{}.excalidraw", file_id);
+    let engine = state.sync_engine.lock().await;
+    let is_cloud_sync_enabled = engine.is_cloud_sync_enabled();
+    let cos_object_key = if is_cloud_sync_enabled {
+        Some(format!("files/{}.excalidraw", file_id))
+    } else {
+        None
+    };
 
     let meta = FileMeta {
         id: file_id.clone(),
         title: "Untitled".to_string(),
         last_modified: now_ms,
         content_hash: content_hash.clone(),
-        cos_object_key: Some(cos_object_key),
-        sync_status: SyncStatus::PendingSync,
-        base_content_hash: None,
+        cos_object_key,
+        sync_status: if is_cloud_sync_enabled {
+            SyncStatus::PendingSync
+        } else {
+            SyncStatus::Synced
+        },
+        base_content_hash: if is_cloud_sync_enabled {
+            None
+        } else {
+            Some(content_hash)
+        },
         is_conflict_copy: false,
         parent_file_id: None,
         deleted: false,
         created_at: now_ms,
     };
-
-    let engine = state.sync_engine.lock().await;
 
     // Write empty canvas to local file store.
     engine
@@ -264,21 +278,22 @@ pub async fn create_new_file(
         .upsert_file_meta(&meta)
         .map_err(|e| format!("Failed to save new file metadata: {}", e))?;
 
-    // Enqueue upload for background sync.
-    let upload_entry = QueuedUpload {
-        id: 0, // auto-incremented by SQLite
-        file_id: file_id.clone(),
-        operation: UploadOperation::Upload,
-        payload: None,
-        retry_count: 0,
-        max_retries: 5,
-        created_at: now_ms,
-    };
+    if is_cloud_sync_enabled {
+        let upload_entry = QueuedUpload {
+            id: 0, // auto-incremented by SQLite
+            file_id: file_id.clone(),
+            operation: UploadOperation::Upload,
+            payload: None,
+            retry_count: 0,
+            max_retries: 5,
+            created_at: now_ms,
+        };
 
-    engine
-        .db
-        .enqueue_upload(&upload_entry)
-        .map_err(|e| format!("Failed to enqueue upload for new file: {}", e))?;
+        engine
+            .db
+            .enqueue_upload(&upload_entry)
+            .map_err(|e| format!("Failed to enqueue upload for new file: {}", e))?;
+    }
 
     let entry = file_meta_to_entry(&meta);
     let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
@@ -300,6 +315,21 @@ pub async fn delete_file(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let engine = state.sync_engine.lock().await;
+    let is_cloud_sync_enabled = engine.is_cloud_sync_enabled();
+
+    if !is_cloud_sync_enabled {
+        engine
+            .file_store
+            .delete_canvas(&file_id)
+            .map_err(|e| format!("Failed to delete local canvas file: {}", e))?;
+        engine
+            .db
+            .delete_file_meta(&file_id)
+            .map_err(|e| format!("Failed to delete local file metadata: {}", e))?;
+
+        let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
+        return Ok(());
+    }
 
     // Get existing metadata.
     let mut meta = engine
@@ -368,6 +398,7 @@ pub async fn rename_file(
     validate_file_title(&new_title)?;
 
     let engine = state.sync_engine.lock().await;
+    let is_cloud_sync_enabled = engine.is_cloud_sync_enabled();
 
     // Get existing metadata.
     let mut meta = engine
@@ -378,7 +409,11 @@ pub async fn rename_file(
 
     // Update title and last_modified.
     meta.title = new_title.clone();
-    meta.sync_status = SyncStatus::PendingSync;
+    meta.sync_status = if is_cloud_sync_enabled {
+        SyncStatus::PendingSync
+    } else {
+        SyncStatus::Synced
+    };
     meta.last_modified = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -389,22 +424,23 @@ pub async fn rename_file(
         .upsert_file_meta(&meta)
         .map_err(|e| format!("Failed to update file metadata: {}", e))?;
 
-    // Enqueue rename operation for COS sync.
-    let payload = serde_json::json!({ "newTitle": new_title }).to_string();
-    let upload_entry = QueuedUpload {
-        id: 0,
-        file_id: file_id.clone(),
-        operation: UploadOperation::Rename,
-        payload: Some(payload),
-        retry_count: 0,
-        max_retries: 5,
-        created_at: meta.last_modified,
-    };
+    if is_cloud_sync_enabled {
+        let payload = serde_json::json!({ "newTitle": new_title }).to_string();
+        let upload_entry = QueuedUpload {
+            id: 0,
+            file_id: file_id.clone(),
+            operation: UploadOperation::Rename,
+            payload: Some(payload),
+            retry_count: 0,
+            max_retries: 5,
+            created_at: meta.last_modified,
+        };
 
-    engine
-        .db
-        .enqueue_upload(&upload_entry)
-        .map_err(|e| format!("Failed to enqueue rename operation: {}", e))?;
+        engine
+            .db
+            .enqueue_upload(&upload_entry)
+            .map_err(|e| format!("Failed to enqueue rename operation: {}", e))?;
+    }
 
     let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
 
@@ -562,9 +598,7 @@ fn file_meta_to_entry(meta: &FileMeta) -> FileEntry {
 ///
 /// Validates: Requirements 5.1, 4.1
 #[tauri::command]
-pub async fn get_file_list(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<FileEntry>, String> {
+pub async fn get_file_list(state: tauri::State<'_, AppState>) -> Result<Vec<FileEntry>, String> {
     let engine = state.sync_engine.lock().await;
     let files = engine
         .db

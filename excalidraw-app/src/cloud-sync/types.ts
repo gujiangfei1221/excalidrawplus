@@ -24,6 +24,7 @@ export type FileSyncStatus = "synced" | "pending-sync" | "conflict";
  */
 export type SyncStatus =
   | "idle"
+  | "local-only"
   | "saving"
   | "synced"
   | "pending-sync"
@@ -72,6 +73,8 @@ export interface SyncStatusIndicatorProps {
 export interface FileListSidebarProps {
   files: FileEntry[];
   activeFileId: string | null;
+  isCloudSyncEnabled?: boolean;
+  onOpenSettings?: () => void;
   onFileSelect: (fileId: string) => void;
   onFileRename: (fileId: string, newTitle: string) => void;
   onFileDelete: (fileId: string) => void;
@@ -85,5 +88,6 @@ export interface FileListSidebarProps {
 export interface CosConfigFormProps {
   initialValues?: Partial<CosConfig>;
   onSubmit: (config: CosConfig) => Promise<void>;
+  onCancel?: () => void;
   error?: string;
 }

@@ -58,13 +58,15 @@ fn setup_cloud_sync(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
 
     let db = Database::open(&app_data_dir.join("metadata.sqlite"))?;
     let config = db.get_cos_config()?;
+    let has_cos_config = config.is_some();
     let cos_config = config.unwrap_or_else(placeholder_cos_config);
     let cos_client = CosClient::new(&cos_config).map_err(std::io::Error::other)?;
     let file_store = FileStore::new(app_data_dir.join("files"))?;
     let conn_monitor = ConnectivityMonitor::new(Arc::new(cos_client.clone()));
     let mut sync_engine = SyncEngine::new(cos_client, db, file_store, conn_monitor);
+    sync_engine.set_cloud_sync_enabled(has_cos_config);
 
-    if !cos_config.secret_id.starts_with("placeholder-") {
+    if has_cos_config {
         sync_engine.start(app.handle().clone());
     }
 

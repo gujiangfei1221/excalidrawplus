@@ -43,7 +43,13 @@ const serializeCanvas = (
   });
 };
 
-const CloudSyncEditor = () => {
+const CloudSyncEditor = ({
+  isCloudSyncEnabled,
+  onOpenSettings,
+}: {
+  isCloudSyncEnabled: boolean;
+  onOpenSettings: () => void;
+}) => {
   const excalidrawAPI = useExcalidrawAPI();
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
@@ -209,16 +215,18 @@ const CloudSyncEditor = () => {
       <FileListSidebar
         activeFileId={activeFileId}
         files={files}
+        isCloudSyncEnabled={isCloudSyncEnabled}
         onFileDelete={deleteFile}
         onFileRename={renameFile}
         onFileSelect={selectFile}
         onNewFile={createFile}
+        onOpenSettings={onOpenSettings}
       />
       <main className="cloud-sync-editor">
         <div className="cloud-sync-toolbar">
           <SyncStatusIndicator
             lastSyncTime={lastSyncTime}
-            status={status}
+            status={isCloudSyncEnabled ? status : "local-only"}
           />
           {activeConflictCount > 0 && (
             <div className="cloud-sync-conflicts" role="status">
@@ -247,14 +255,15 @@ const CloudSyncEditor = () => {
 
 export const CloudSyncApp = () => {
   const [isLoading, setIsLoading] = useState(true);
-  const [hasConfig, setHasConfig] = useState(false);
+  const [cosConfig, setCosConfig] = useState<CosConfig | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [configError, setConfigError] = useState("");
 
   useEffect(() => {
     cloudSyncBridge
       .getCosConfig()
-      .then((config) => setHasConfig(!!config))
-      .catch(() => setHasConfig(false))
+      .then((config) => setCosConfig(config))
+      .catch(() => setCosConfig(null))
       .finally(() => setIsLoading(false));
   }, []);
 
@@ -263,7 +272,8 @@ export const CloudSyncApp = () => {
     try {
       await cloudSyncBridge.validateCosConfig(config);
       await cloudSyncBridge.saveCosConfig(config);
-      setHasConfig(true);
+      setCosConfig(config);
+      setIsSettingsOpen(false);
     } catch (err: any) {
       setConfigError(err.message);
     }
@@ -273,17 +283,28 @@ export const CloudSyncApp = () => {
     return <div className="cloud-sync-loading">Loading...</div>;
   }
 
-  if (!hasConfig) {
-    return (
-      <div className="cloud-sync-config-page">
-        <CosConfigForm error={configError} onSubmit={submitConfig} />
-      </div>
-    );
-  }
-
   return (
     <ExcalidrawAPIProvider>
-      <CloudSyncEditor />
+      <CloudSyncEditor
+        isCloudSyncEnabled={!!cosConfig}
+        onOpenSettings={() => {
+          setConfigError("");
+          setIsSettingsOpen(true);
+        }}
+      />
+      {isSettingsOpen && (
+        <div className="cloud-sync-settings" role="dialog">
+          <CosConfigForm
+            error={configError}
+            initialValues={cosConfig ?? undefined}
+            onCancel={() => {
+              setConfigError("");
+              setIsSettingsOpen(false);
+            }}
+            onSubmit={submitConfig}
+          />
+        </div>
+      )}
     </ExcalidrawAPIProvider>
   );
 };

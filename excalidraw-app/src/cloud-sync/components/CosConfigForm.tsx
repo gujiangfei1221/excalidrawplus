@@ -13,6 +13,7 @@ const EMPTY_CONFIG: CosConfig = {
 export const CosConfigForm = ({
   initialValues,
   onSubmit,
+  onCancel,
   error,
 }: CosConfigFormProps) => {
   const [values, setValues] = useState<CosConfig>({
@@ -23,8 +24,7 @@ export const CosConfigForm = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const updateField =
-    (field: keyof CosConfig) =>
-    (event: ChangeEvent<HTMLInputElement>) => {
+    (field: keyof CosConfig) => (event: ChangeEvent<HTMLInputElement>) => {
       setValues((current) => ({ ...current, [field]: event.target.value }));
       setLocalError("");
     };
@@ -91,9 +91,16 @@ export const CosConfigForm = ({
           {localError || error}
         </p>
       )}
-      <button disabled={isSubmitting} type="submit">
-        {isSubmitting ? "Validating..." : "Connect"}
-      </button>
+      <div className="cloud-sync-config__actions">
+        {onCancel && (
+          <button onClick={onCancel} type="button">
+            Cancel
+          </button>
+        )}
+        <button disabled={isSubmitting} type="submit">
+          {isSubmitting ? "Validating..." : "Connect"}
+        </button>
+      </div>
     </form>
   );
 };
