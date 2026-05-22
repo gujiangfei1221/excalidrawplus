@@ -73,6 +73,7 @@ export interface SyncStatusIndicatorProps {
 export interface FileListSidebarProps {
   files: FileEntry[];
   activeFileId: string | null;
+  deletingFileIds?: ReadonlySet<string>;
   isCloudSyncEnabled?: boolean;
   onOpenSettings?: () => void;
   onFileSelect: (fileId: string) => void;

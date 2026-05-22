@@ -62,9 +62,13 @@ const CloudSyncEditor = ({
   const [status, setStatus] = useState<SyncStatus>("idle");
   const [lastSyncTime, setLastSyncTime] = useState<number | undefined>();
   const [error, setError] = useState("");
+  const [deletingFileIds, setDeletingFileIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const hasUnsavedChangesRef = useRef(false);
   const latestCanvasRef = useRef(JSON.stringify(EMPTY_CANVAS));
   const fallbackFilePromiseRef = useRef<Promise<FileEntry> | null>(null);
+  const deletingFileIdsRef = useRef(new Set<string>());
 
   const refreshFiles = useCallback(async () => {
     const nextFiles = await cloudSyncBridge.getFileList();
@@ -232,16 +236,33 @@ const CloudSyncEditor = ({
   };
 
   const deleteFile = async (fileId: string) => {
-    if (fileId === activeFileId) {
-      debouncedSave.flush();
-      hasUnsavedChangesRef.current = false;
+    if (deletingFileIdsRef.current.has(fileId)) {
+      return;
     }
 
-    await cloudSyncBridge.deleteFile(fileId);
-    const nextFiles = await refreshFiles();
-    if (fileId === activeFileId) {
-      const availableFiles = await ensureFileListHasFile(nextFiles);
-      setActiveFileId(availableFiles[0]?.id ?? null);
+    deletingFileIdsRef.current.add(fileId);
+    setDeletingFileIds(new Set(deletingFileIdsRef.current));
+
+    const isDeletingActiveFile = fileId === activeFileId;
+
+    try {
+      if (isDeletingActiveFile) {
+        debouncedSave.flush();
+        hasUnsavedChangesRef.current = false;
+      }
+
+      await cloudSyncBridge.deleteFile(fileId);
+      const nextFiles = await refreshFiles();
+      if (isDeletingActiveFile) {
+        const availableFiles = await ensureFileListHasFile(nextFiles);
+        setActiveFileId(availableFiles[0]?.id ?? null);
+      }
+    } catch (err: any) {
+      setStatus("error");
+      setError(err.message);
+    } finally {
+      deletingFileIdsRef.current.delete(fileId);
+      setDeletingFileIds(new Set(deletingFileIdsRef.current));
     }
   };
 
@@ -253,6 +274,7 @@ const CloudSyncEditor = ({
     <div className="cloud-sync-app">
       <FileListSidebar
         activeFileId={activeFileId}
+        deletingFileIds={deletingFileIds}
         files={files}
         isCloudSyncEnabled={isCloudSyncEnabled}
         onFileDelete={deleteFile}

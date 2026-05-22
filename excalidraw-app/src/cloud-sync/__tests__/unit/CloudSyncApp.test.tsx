@@ -100,14 +100,24 @@ describe("CloudSyncApp file creation fallback", () => {
       .mockResolvedValueOnce([onlyFile])
       .mockResolvedValue([]);
 
+    let resolveDelete: (() => void) | undefined;
+    bridgeMocks.deleteFile.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDelete = resolve;
+        }),
+    );
+
     render(<CloudSyncApp />);
 
     const deleteButton = await screen.findByLabelText("Delete Only file");
     fireEvent.click(deleteButton);
+    await waitFor(() => expect(deleteButton).toBeDisabled());
     fireEvent.click(deleteButton);
+    resolveDelete?.();
 
     await waitFor(() => {
-      expect(bridgeMocks.deleteFile).toHaveBeenCalledTimes(2);
+      expect(bridgeMocks.deleteFile).toHaveBeenCalledTimes(1);
       expect(bridgeMocks.createNewFile).toHaveBeenCalledTimes(1);
     });
   });

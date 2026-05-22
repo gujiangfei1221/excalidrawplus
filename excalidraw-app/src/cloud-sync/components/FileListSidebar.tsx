@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
 
-import type { FileEntry, FileListSidebarProps } from "../types";
 import {
   formatRelativeTime,
   sortFilesByLastModifiedDesc,
   truncateFileTitle,
   validateFileTitle,
 } from "../utils";
+
+import type { FileEntry, FileListSidebarProps } from "../types";
 
 const STATUS_LABEL: Record<FileEntry["syncStatus"], string> = {
   synced: "OK",
@@ -17,6 +18,7 @@ const STATUS_LABEL: Record<FileEntry["syncStatus"], string> = {
 export const FileListSidebar = ({
   files,
   activeFileId,
+  deletingFileIds,
   isCloudSyncEnabled = true,
   onOpenSettings,
   onFileSelect,
@@ -80,6 +82,7 @@ export const FileListSidebar = ({
       <ul className="cloud-sync-file-list">
         {sortedFiles.map((file) => {
           const isEditing = editingId === file.id;
+          const isDeleting = deletingFileIds?.has(file.id) ?? false;
 
           return (
             <li
@@ -158,12 +161,16 @@ export const FileListSidebar = ({
                 </button>
                 <button
                   aria-label={`Delete ${file.title}`}
+                  disabled={isDeleting}
                   onClick={() => {
+                    if (isDeleting) {
+                      return;
+                    }
                     if (window.confirm(`Delete "${file.title}"?`)) {
                       onFileDelete(file.id);
                     }
                   }}
-                  title="Delete"
+                  title={isDeleting ? "Deleting..." : "Delete"}
                   type="button"
                 >
                   X
