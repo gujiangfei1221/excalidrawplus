@@ -2,6 +2,9 @@ import {
   CaptureUpdateAction,
   Excalidraw,
   ExcalidrawAPIProvider,
+  restoreAppState,
+  restoreElements,
+  serializeAsJSON,
   useExcalidrawAPI,
 } from "@excalidraw/excalidraw";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -33,14 +36,15 @@ const serializeCanvas = (
   appState: AppState,
   files: BinaryFiles,
 ) => {
-  return JSON.stringify({
-    type: "excalidraw",
-    version: 2,
-    source: "cloud-sync-desktop",
-    elements,
-    appState,
-    files,
-  });
+  return serializeAsJSON(elements, appState, files, "local");
+};
+
+const parseCanvas = (rawCanvas: string) => {
+  try {
+    return JSON.parse(rawCanvas || JSON.stringify(EMPTY_CANVAS));
+  } catch {
+    return EMPTY_CANVAS;
+  }
 };
 
 const CloudSyncEditor = ({
@@ -126,10 +130,13 @@ const CloudSyncEditor = ({
     cloudSyncBridge
       .loadCanvas(activeFileId)
       .then((rawCanvas) => {
-        const canvas = JSON.parse(rawCanvas || JSON.stringify(EMPTY_CANVAS));
+        const canvas = parseCanvas(rawCanvas);
         excalidrawAPI.updateScene({
-          elements: canvas.elements || [],
-          appState: canvas.appState || {},
+          elements: restoreElements(canvas.elements || [], null, {
+            repairBindings: true,
+            deleteInvisibleElements: true,
+          }),
+          appState: restoreAppState(canvas.appState || {}, null),
           captureUpdate: CaptureUpdateAction.IMMEDIATELY,
         });
         if (canvas.files) {
@@ -202,7 +209,14 @@ const CloudSyncEditor = ({
     await cloudSyncBridge.deleteFile(fileId);
     const nextFiles = await refreshFiles();
     if (fileId === activeFileId) {
-      setActiveFileId(nextFiles[0]?.id ?? null);
+      if (nextFiles[0]) {
+        setActiveFileId(nextFiles[0].id);
+        return;
+      }
+
+      const created = await cloudSyncBridge.createNewFile();
+      setFiles([created]);
+      setActiveFileId(created.id);
     }
   };
 
