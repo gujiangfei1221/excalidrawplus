@@ -17,6 +17,19 @@
   border-right: 1px solid #d8dee4;
   background: #ffffff;
   padding: 12px;
+  transition:
+    flex-basis 180ms ease,
+    min-width 180ms ease,
+    max-width 180ms ease,
+    padding 180ms ease;
+}
+
+.cloud-sync-sidebar.is-collapsed {
+  flex-basis: 56px;
+  min-width: 56px;
+  max-width: 56px;
+  overflow: hidden;
+  padding: 12px 8px;
 }
 
 .cloud-sync-sidebar__header,
@@ -31,6 +44,7 @@
 
 .cloud-sync-sidebar__header {
   justify-content: space-between;
+  gap: 8px;
 }
 
 .cloud-sync-sidebar__actions,
@@ -39,8 +53,14 @@
   gap: 8px;
 }
 
+.cloud-sync-sidebar.is-collapsed .cloud-sync-sidebar__header,
+.cloud-sync-sidebar.is-collapsed .cloud-sync-sidebar__actions {
+  justify-content: center;
+}
+
 .cloud-sync-sidebar button,
 .cloud-sync-config button,
+.cloud-sync-toolbar button,
 .cloud-sync-file input {
   border: 1px solid #d0d7de;
   border-radius: 6px;
@@ -49,10 +69,16 @@
 }
 
 .cloud-sync-sidebar button,
-.cloud-sync-config button {
+.cloud-sync-config button,
+.cloud-sync-toolbar button {
   min-height: 32px;
   padding: 0 10px;
   cursor: pointer;
+}
+
+.cloud-sync-sidebar.is-collapsed button {
+  padding: 0;
+  width: 32px;
 }
 
 .cloud-sync-file-list {
@@ -63,6 +89,21 @@
   padding: 0;
   list-style: none;
   overflow: auto;
+}
+
+.cloud-sync-file-list__empty {
+  padding: 12px 8px;
+  border: 1px dashed #d0d7de;
+  border-radius: 6px;
+  color: #6e7781;
+  font-size: 13px;
+  text-align: center;
+  list-style: none;
+}
+
+.cloud-sync-sidebar.is-collapsed .cloud-sync-file-list,
+.cloud-sync-sidebar.is-collapsed .cloud-sync-error {
+  display: none;
 }
 
 .cloud-sync-file {
@@ -89,13 +130,28 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 22px;
-  width: 22px;
-  height: 22px;
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: #f0f3f6;
-  font-size: 11px;
-  font-weight: 700;
+  margin-top: 4px;
+}
+
+.cloud-sync-file__status.is-synced {
+  background: #1a7f37;
+}
+
+.cloud-sync-file__status.is-pending-sync {
+  background: #bf8700;
+}
+
+.cloud-sync-file__status.is-conflict {
+  background: #cf222e;
+}
+
+.cloud-sync-file__status.is-local-only {
+  background: #8c959f;
 }
 
 .cloud-sync-file__text {
@@ -136,10 +192,17 @@
 .cloud-sync-toolbar {
   box-sizing: border-box;
   min-height: 44px;
+  flex-wrap: wrap;
   gap: 12px;
+  row-gap: 6px;
   border-bottom: 1px solid #d8dee4;
   background: #ffffff;
   padding: 6px 12px;
+}
+
+.cloud-sync-toolbar__actions {
+  display: flex;
+  gap: 8px;
 }
 
 .cloud-sync-canvas {
@@ -149,6 +212,10 @@
 
 .cloud-sync-canvas .excalidraw {
   height: 100%;
+}
+
+.cloud-sync-canvas .main-menu-trigger {
+  display: none;
 }
 
 .cloud-sync-status {
@@ -242,6 +309,21 @@
   margin: 0;
   color: #cf222e;
   font-size: 13px;
+}
+
+.cloud-sync-config__status,
+.cloud-sync-connection-notice {
+  margin: 0;
+  font-size: 13px;
+  color: #57606a;
+}
+
+.cloud-sync-connection-notice {
+  margin-left: auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #dff7e5;
+  color: #1a7f37;
 }
 
 .cloud-sync-conflicts {

@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
+use tauri::async_runtime::JoinHandle;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use crate::cos_client::CosClient;
 
@@ -93,7 +93,7 @@ impl ConnectivityMonitor {
         let tx = self.tx.clone();
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        let task = tokio::spawn(async move {
+        let task = tauri::async_runtime::spawn(async move {
             loop {
                 // Perform the connectivity check.
                 let online = cos_client.test_connection().await.unwrap_or(false);

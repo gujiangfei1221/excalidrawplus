@@ -12,6 +12,7 @@ use connectivity::ConnectivityMonitor;
 use cos_client::CosClient;
 use database::Database;
 use file_store::FileStore;
+use logging::{init_file_logging, install_panic_hook};
 use models::CosConfig;
 use sync_engine::SyncEngine;
 use tauri::Manager;
@@ -22,6 +23,7 @@ pub mod connectivity;
 pub mod cos_client;
 pub mod database;
 pub mod file_store;
+pub mod logging;
 pub mod models;
 pub mod sync_engine;
 
@@ -30,6 +32,7 @@ mod tests;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_panic_hook();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(setup_cloud_sync)
@@ -39,6 +42,7 @@ pub fn run() {
             commands::get_cos_config,
             commands::save_canvas,
             commands::load_canvas,
+            commands::download_canvas,
             commands::create_new_file,
             commands::delete_file,
             commands::rename_file,
@@ -48,31 +52,48 @@ pub fn run() {
             commands::get_sync_status,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|error| {
+            tracing::error!(error = %error, "error while running tauri application");
+            panic!("error while running tauri application");
+        });
 }
 
 fn setup_cloud_sync(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let app_data_dir = app.path().app_data_dir()?;
+    let setup_result: Result<(), Box<dyn std::error::Error>> = (|| {
+        let app_data_dir = app.path().app_data_dir()?;
 
-    std::fs::create_dir_all(&app_data_dir)?;
+        std::fs::create_dir_all(&app_data_dir)?;
+        init_file_logging(&app_data_dir)?;
+        tracing::info!("starting cloud sync app setup");
 
-    let db = Database::open(&app_data_dir.join("metadata.sqlite"))?;
-    let config = db.get_cos_config()?;
-    let has_cos_config = config.is_some();
-    let cos_config = config.unwrap_or_else(placeholder_cos_config);
-    let cos_client = CosClient::new(&cos_config).map_err(std::io::Error::other)?;
-    let file_store = FileStore::new(app_data_dir.join("files"))?;
-    let conn_monitor = ConnectivityMonitor::new(Arc::new(cos_client.clone()));
-    let mut sync_engine = SyncEngine::new(cos_client, db, file_store, conn_monitor);
-    sync_engine.set_cloud_sync_enabled(has_cos_config);
+        let db = Database::open(&app_data_dir.join("metadata.sqlite"))?;
+        let config = db.get_cos_config()?;
+        let has_cos_config = config.is_some();
+        let cos_config = config.unwrap_or_else(placeholder_cos_config);
+        let cos_client = CosClient::new(&cos_config).map_err(std::io::Error::other)?;
+        let file_store = FileStore::new(app_data_dir.join("files"))?;
+        let conn_monitor = ConnectivityMonitor::new(Arc::new(cos_client.clone()));
+        let mut sync_engine = SyncEngine::new(cos_client, db, file_store, conn_monitor);
+        sync_engine.set_cloud_sync_enabled(has_cos_config);
 
-    if has_cos_config {
-        sync_engine.start(app.handle().clone());
+        if has_cos_config {
+            tracing::info!("COS config found, starting sync engine");
+            sync_engine.start(app.handle().clone());
+        } else {
+            tracing::info!("no COS config found, starting in disconnected mode");
+        }
+
+        app.manage(AppState {
+            sync_engine: Arc::new(Mutex::new(sync_engine)),
+        });
+
+        Ok(())
+    })();
+
+    if let Err(error) = setup_result {
+        tracing::error!(error = %error, "cloud sync app setup failed");
+        return Err(error);
     }
-
-    app.manage(AppState {
-        sync_engine: Arc::new(Mutex::new(sync_engine)),
-    });
 
     Ok(())
 }

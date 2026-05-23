@@ -21,6 +21,7 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     Client,
 };
+use tracing::{debug, info, warn};
 
 use crate::models::CosConfig;
 
@@ -52,12 +53,14 @@ pub struct CosClient {
 impl CosClient {
     /// Build a COS client from a user-supplied [`CosConfig`].
     ///
-    /// The endpoint is constructed using the virtual-hosted bucket style
-    /// described in the Tencent COS documentation. The SDK's path-style
-    /// addressing is explicitly disabled so requests target
-    /// `https://{bucket}.cos.{region}.myqcloud.com/{key}` rather than
-    /// folding the bucket into the URL path.
+    /// The endpoint is constructed from the regional COS host and the SDK
+    /// is allowed to apply the bucket as a virtual-hosted prefix.
     pub fn new(config: &CosConfig) -> Result<Self, String> {
+        info!(
+            bucket = %config.bucket,
+            region = %config.region,
+            "building COS client"
+        );
         if config.bucket.trim().is_empty() {
             return Err("COS bucket is empty".to_string());
         }
@@ -71,11 +74,7 @@ impl CosClient {
             return Err("COS secret_key is empty".to_string());
         }
 
-        let endpoint = format!(
-            "https://{bucket}.cos.{region}.myqcloud.com",
-            bucket = config.bucket,
-            region = config.region,
-        );
+        let endpoint = format!("https://cos.{region}.myqcloud.com", region = config.region);
 
         let credentials = Credentials::new(
             config.secret_id.clone(),
@@ -183,13 +182,18 @@ impl CosClient {
     /// returns `Ok(true)`; any error is surfaced to the caller so the
     /// configuration form can show a useful message.
     pub async fn test_connection(&self) -> Result<bool, String> {
+        debug!(bucket = %self.bucket, "testing COS connection");
         self.client
             .list_objects_v2()
             .bucket(&self.bucket)
             .max_keys(1)
             .send()
             .await
-            .map_err(|e| format!("COS test_connection failed: {e}"))?;
+            .map_err(|e| {
+                warn!(bucket = %self.bucket, error = %e, "COS connection test failed");
+                format!("COS test_connection failed: {e}")
+            })?;
+        info!(bucket = %self.bucket, "COS connection test succeeded");
         Ok(true)
     }
 }
@@ -207,6 +211,13 @@ mod tests {
             bucket: "my-bucket-1250000000".to_string(),
             region: "ap-guangzhou".to_string(),
         }
+    }
+
+    #[test]
+    fn regional_endpoint_does_not_include_bucket_name() {
+        let config = valid_config();
+        let endpoint = format!("https://cos.{region}.myqcloud.com", region = config.region);
+        assert_eq!(endpoint, "https://cos.ap-guangzhou.myqcloud.com");
     }
 
     // --- Validation tests: empty fields should return Err ---

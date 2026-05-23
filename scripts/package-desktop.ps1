@@ -25,6 +25,28 @@ function Write-OutputFile {
   }
 }
 
+function Remove-PathIfExists {
+  param([string]$Path)
+
+  if (Test-Path -LiteralPath $Path) {
+    Remove-Item -LiteralPath $Path -Recurse -Force
+    Write-Host "  removed $Path"
+  }
+}
+
+function Get-RunningDesktopProcesses {
+  param([string]$TargetDir)
+
+  @(
+    Get-CimInstance Win32_Process |
+      Where-Object {
+        $_.Name -eq "excalidraw-cloud-sync.exe" -and
+        $_.ExecutablePath -and
+        $_.ExecutablePath.StartsWith($TargetDir, [System.StringComparison]::OrdinalIgnoreCase)
+      }
+  )
+}
+
 if ($Help) {
   @"
 Build the Excalidraw Tauri desktop app for Windows.
@@ -82,6 +104,20 @@ try {
   Write-Host "  Tauri CLI not found. Installing tauri-cli v2..." -ForegroundColor Yellow
   & cargo install tauri-cli --version "^2" --locked
 }
+
+$runningDesktopProcesses = @(Get-RunningDesktopProcesses -TargetDir $tauriDir)
+if ($runningDesktopProcesses.Count -gt 0) {
+  Write-Step "Detected running desktop app"
+  $runningDesktopProcesses | ForEach-Object {
+    Write-Host ("  PID {0}  {1}" -f $_.ProcessId, $_.ExecutablePath) -ForegroundColor Yellow
+  }
+  throw "Close the running Excalidraw desktop app before building, then run the script again."
+}
+
+Write-Step "Cleaning previous desktop outputs"
+Remove-PathIfExists (Join-Path $tauriDir "target\release\bundle")
+Remove-PathIfExists (Join-Path $tauriDir "target\release\excalidraw-cloud-sync.exe")
+Remove-PathIfExists (Join-Path $tauriDir "target\release\excalidraw-cloud-sync.pdb")
 
 Write-Step "Building desktop package"
 Push-Location $tauriDir

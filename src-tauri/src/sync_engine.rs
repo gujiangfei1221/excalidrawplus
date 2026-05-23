@@ -21,14 +21,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tauri::async_runtime::JoinHandle;
 use tauri::AppHandle;
-use tokio::task::JoinHandle;
 
 use crate::connectivity::ConnectivityMonitor;
 use crate::cos_client::CosClient;
 use crate::database::Database;
 use crate::file_store::FileStore;
-use crate::models::{Conflict, FileMeta, Manifest, ManifestEntry, SyncStatus};
+use crate::models::{Conflict, FileMeta, Manifest, ManifestEntry, SyncStatus, UploadOperation};
 
 /// Interval (in seconds) between manifest polling cycles.
 const MANIFEST_POLL_INTERVAL_SECS: u64 = 30;
@@ -39,6 +39,87 @@ const QUEUE_PROCESS_INTERVAL_SECS: u64 = 5;
 /// Maximum number of conflict copies allowed per file.
 /// When a new conflict would exceed this limit, the oldest copy is deleted.
 const MAX_CONFLICT_COPIES: usize = 5;
+
+/// Root prefix for all COS objects owned by this app.
+pub(crate) const COS_ROOT_PREFIX: &str = "excalidraw";
+
+/// Manifest location inside the app-owned COS prefix.
+const MANIFEST_KEY: &str = "excalidraw/manifest.json";
+
+/// Legacy manifest location used by earlier builds.
+const LEGACY_MANIFEST_KEY: &str = "manifest.json";
+
+pub(crate) fn sanitize_title_for_cos_filename(title: &str) -> String {
+    let sanitized: String = title
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect();
+
+    let sanitized = sanitized.trim_matches([' ', '.']).trim();
+    if sanitized.is_empty() {
+        "Untitled".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+pub(crate) fn cos_object_key_for_title(title: &str) -> String {
+    format!(
+        "{}/{}.excalidraw",
+        COS_ROOT_PREFIX,
+        sanitize_title_for_cos_filename(title)
+    )
+}
+
+pub(crate) fn cos_object_key_for_file(meta: &FileMeta) -> String {
+    cos_object_key_for_title(&meta.title)
+}
+
+fn is_missing_cos_object_error(error: &str) -> bool {
+    error.contains("NoSuchKey")
+        || error.contains("NotFound")
+        || error.contains("not found")
+        || error.contains("404")
+}
+
+async fn download_manifest(cos_client: &CosClient) -> Result<Manifest, String> {
+    match cos_client.get_object(MANIFEST_KEY).await {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| format!("Failed to deserialize {MANIFEST_KEY}: {e}")),
+        Err(primary_error) if is_missing_cos_object_error(&primary_error) => {
+            match cos_client.get_object(LEGACY_MANIFEST_KEY).await {
+                Ok(bytes) => serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("Failed to deserialize {LEGACY_MANIFEST_KEY}: {e}")),
+                Err(legacy_error) if is_missing_cos_object_error(&legacy_error) => Ok(Manifest {
+                    version: 1,
+                    last_modified: 0,
+                    files: Vec::new(),
+                }),
+                Err(legacy_error) => Err(format!(
+                    "Failed to download {MANIFEST_KEY}; legacy {LEGACY_MANIFEST_KEY} also failed: {legacy_error}"
+                )),
+            }
+        }
+        Err(error) => Err(format!("Failed to download {MANIFEST_KEY}: {error}")),
+    }
+}
+
+fn old_object_key_from_payload(payload: Option<&str>) -> Option<String> {
+    payload
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .and_then(|value| {
+            value
+                .get("oldObjectKey")
+                .and_then(|old_key| old_key.as_str())
+                .map(str::to_string)
+        })
+        .filter(|old_key| !old_key.trim().is_empty())
+}
 
 /// The core sync engine that coordinates cloud synchronization.
 ///
@@ -110,7 +191,7 @@ impl SyncEngine {
         let conn_monitor_poll = Arc::clone(&self.conn_monitor);
         let cos_client_poll = Arc::clone(&self.cos_client);
         let db_poll = Arc::clone(&self.db);
-        let poll_handle = tokio::spawn(async move {
+        let poll_handle = tauri::async_runtime::spawn(async move {
             loop {
                 // Only poll when online.
                 if conn_monitor_poll.is_online() {
@@ -131,7 +212,7 @@ impl SyncEngine {
         let cos_client_queue = Arc::clone(&self.cos_client);
         let db_queue = Arc::clone(&self.db);
         let file_store_queue = Arc::clone(&self.file_store);
-        let queue_handle = tokio::spawn(async move {
+        let queue_handle = tauri::async_runtime::spawn(async move {
             loop {
                 // Only process the queue when online.
                 if conn_monitor_queue.is_online() {
@@ -194,7 +275,7 @@ impl SyncEngine {
                 continue;
             }
 
-            meta.cos_object_key = Some(format!("files/{}.excalidraw", meta.id));
+            meta.cos_object_key = Some(cos_object_key_for_file(&meta));
             meta.sync_status = SyncStatus::PendingSync;
             meta.base_content_hash = None;
 
@@ -256,18 +337,20 @@ impl SyncEngine {
             .map_err(|e| format!("Failed to read file metadata: {}", e))?;
 
         let content_is_synced_locally = !self.cloud_sync_enabled;
+        let title = existing
+            .as_ref()
+            .map(|m| m.title.clone())
+            .unwrap_or_else(|| "Untitled".to_string());
+
         let cos_object_key = if self.cloud_sync_enabled {
-            Some(format!("files/{}.excalidraw", file_id))
+            Some(cos_object_key_for_title(&title))
         } else {
             existing.as_ref().and_then(|m| m.cos_object_key.clone())
         };
 
         let meta = FileMeta {
             id: file_id.to_string(),
-            title: existing
-                .as_ref()
-                .map(|m| m.title.clone())
-                .unwrap_or_else(|| "Untitled".to_string()),
+            title,
             last_modified: now_ms,
             content_hash: content_hash.clone(),
             cos_object_key,
@@ -492,6 +575,20 @@ impl SyncEngine {
         }
     }
 
+    /// Force-download a canvas from COS and overwrite the local cache.
+    ///
+    /// Unlike [`load_canvas`](Self::load_canvas), this always fetches the
+    /// remote object instead of serving a cached local copy.
+    pub async fn download_canvas(&self, file_id: &str) -> Result<String, String> {
+        let meta = self
+            .db
+            .get_file_meta(file_id)
+            .map_err(|e| format!("Failed to get file metadata for {}: {}", file_id, e))?
+            .ok_or_else(|| format!("File not found in database: {}", file_id))?;
+
+        self.download_and_cache(file_id, &meta).await
+    }
+
     /// Download a file from COS, save it to local store, and update metadata.
     ///
     /// Helper for `load_canvas` — called when the local cache is stale or missing.
@@ -630,10 +727,41 @@ impl SyncEngine {
 
         // 3. Process each entry in chronological order.
         for entry in &pending {
-            // Call upload_file for this entry's file_id.
-            // On success: upload_file already dequeues the entry.
-            // On failure: upload_file already increments retry_count; we skip and continue.
-            let _ = self.upload_file(&entry.file_id).await;
+            match entry.operation {
+                UploadOperation::Upload => {
+                    let _ = self.upload_file(&entry.file_id).await;
+                }
+                UploadOperation::Rename => {
+                    if matches!(self.upload_file(&entry.file_id).await, Ok(SyncStatus::Synced)) {
+                        if let Some(old_key) = old_object_key_from_payload(entry.payload.as_deref())
+                        {
+                            if let Ok(Some(meta)) = self.db.get_file_meta(&entry.file_id) {
+                                if meta.cos_object_key.as_deref() != Some(old_key.as_str()) {
+                                    let _ = self.cos_client.delete_object(&old_key).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                UploadOperation::Delete => {
+                    if let Ok(Some(meta)) = self.db.get_file_meta(&entry.file_id) {
+                        if let Some(key) = meta.cos_object_key.as_deref() {
+                            match self.cos_client.delete_object(key).await {
+                                Ok(()) => {
+                                    let _ = self.db.dequeue_upload(&entry.file_id);
+                                }
+                                Err(_) => {
+                                    let _ = self.db.increment_retry_count(entry.id);
+                                }
+                            }
+                        } else {
+                            let _ = self.db.dequeue_upload(&entry.file_id);
+                        }
+                    } else {
+                        let _ = self.db.dequeue_upload(&entry.file_id);
+                    }
+                }
+            }
         }
 
         // 4. Return Ok(()) after processing all items.
@@ -699,13 +827,14 @@ impl SyncEngine {
 
         let conflict_title = generate_conflict_title(&original_meta.title);
         let conflict_hash = compute_content_hash(&remote_content);
+        let conflict_cos_object_key = cos_object_key_for_title(&conflict_title);
 
         let conflict_meta = FileMeta {
             id: conflict_copy_id.clone(),
             title: conflict_title,
             last_modified: now_ms,
             content_hash: conflict_hash.clone(),
-            cos_object_key: Some(format!("files/{}.excalidraw", conflict_copy_id)),
+            cos_object_key: Some(conflict_cos_object_key),
             sync_status: SyncStatus::Synced,
             base_content_hash: Some(conflict_hash),
             is_conflict_copy: true,
@@ -817,22 +946,7 @@ impl SyncEngine {
 
         for attempt in 0..MAX_RETRIES {
             // Step 1: Download the current manifest from COS (or create empty if not found).
-            let remote_manifest = match self.cos_client.get_object("manifest.json").await {
-                Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
-                    .map_err(|e| format!("Failed to deserialize manifest.json: {e}"))?,
-                Err(e) => {
-                    // If the manifest doesn't exist (first sync), start with an empty one.
-                    if e.contains("NoSuchKey") || e.contains("not found") || e.contains("404") {
-                        Manifest {
-                            version: 1,
-                            last_modified: 0,
-                            files: Vec::new(),
-                        }
-                    } else {
-                        return Err(format!("Failed to download manifest.json: {e}"));
-                    }
-                }
-            };
+            let remote_manifest = download_manifest(&self.cos_client).await?;
 
             // Step 2: Get all local files from SQLite.
             let local_files = self
@@ -852,7 +966,7 @@ impl SyncEngine {
 
             match self
                 .cos_client
-                .put_object("manifest.json", manifest_json)
+                .put_object(MANIFEST_KEY, manifest_json)
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -991,7 +1105,7 @@ pub(crate) fn merge_manifests(local_files: &[FileMeta], remote: &Manifest) -> Ma
         let object_key = local
             .cos_object_key
             .clone()
-            .unwrap_or_else(|| format!("files/{}.excalidraw", local.id));
+            .unwrap_or_else(|| cos_object_key_for_file(local));
 
         let local_entry = ManifestEntry {
             id: local.id.clone(),
@@ -1054,22 +1168,7 @@ async fn poll_sync_manifest(cos_client: &Arc<CosClient>, db: &Arc<Database>) -> 
 
     for attempt in 0..MAX_RETRIES {
         // Step 1: Download the current manifest from COS (or create empty if not found).
-        let remote_manifest = match cos_client.get_object("manifest.json").await {
-            Ok(bytes) => serde_json::from_slice::<Manifest>(&bytes)
-                .map_err(|e| format!("Failed to deserialize manifest.json: {e}"))?,
-            Err(e) => {
-                // If the manifest doesn't exist (first sync), start with an empty one.
-                if e.contains("NoSuchKey") || e.contains("not found") || e.contains("404") {
-                    Manifest {
-                        version: 1,
-                        last_modified: 0,
-                        files: Vec::new(),
-                    }
-                } else {
-                    return Err(format!("Failed to download manifest.json: {e}"));
-                }
-            }
-        };
+        let remote_manifest = download_manifest(cos_client).await?;
 
         // Step 2: Get all local files from SQLite.
         let local_files = db
@@ -1086,7 +1185,7 @@ async fn poll_sync_manifest(cos_client: &Arc<CosClient>, db: &Arc<Database>) -> 
         let manifest_json = serde_json::to_vec_pretty(&merged)
             .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
 
-        match cos_client.put_object("manifest.json", manifest_json).await {
+        match cos_client.put_object(MANIFEST_KEY, manifest_json).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 if attempt < MAX_RETRIES - 1 {
@@ -1228,44 +1327,69 @@ async fn process_upload_queue_standalone(
             Err(_) => continue,
         };
 
-        // Determine the COS object key.
-        let object_key = match &meta.cos_object_key {
-            Some(key) if !key.trim().is_empty() => key.clone(),
-            _ => continue, // Skip if no COS key configured.
-        };
+        match entry.operation {
+            UploadOperation::Upload | UploadOperation::Rename => {
+                // Determine the COS object key.
+                let object_key = match &meta.cos_object_key {
+                    Some(key) if !key.trim().is_empty() => key.clone(),
+                    _ => continue, // Skip if no COS key configured.
+                };
 
-        // Read the file content from local store.
-        let content = match file_store.read_canvas(&entry.file_id) {
-            Ok(c) => c,
-            Err(_) => continue, // Skip if local file is missing.
-        };
+                // Read the file content from local store.
+                let content = match file_store.read_canvas(&entry.file_id) {
+                    Ok(c) => c,
+                    Err(_) => continue, // Skip if local file is missing.
+                };
 
-        // Attempt to upload via COS.
-        match cos_client
-            .put_object(&object_key, content.into_bytes())
-            .await
-        {
-            Ok(()) => {
-                // Success: update sync_status to Synced.
-                let mut updated_meta = meta.clone();
-                updated_meta.sync_status = SyncStatus::Synced;
-                updated_meta.base_content_hash = Some(meta.content_hash.clone());
-                let _ = db.upsert_file_meta(&updated_meta);
+                // Attempt to upload via COS.
+                match cos_client.put_object(&object_key, content.into_bytes()).await {
+                    Ok(()) => {
+                        // Success: update sync_status to Synced.
+                        let mut updated_meta = meta.clone();
+                        updated_meta.sync_status = SyncStatus::Synced;
+                        updated_meta.base_content_hash = Some(meta.content_hash.clone());
+                        let _ = db.upsert_file_meta(&updated_meta);
 
-                // Dequeue all pending uploads for this file.
-                let _ = db.dequeue_upload(&entry.file_id);
+                        if matches!(entry.operation, UploadOperation::Rename) {
+                            if let Some(old_key) =
+                                old_object_key_from_payload(entry.payload.as_deref())
+                            {
+                                if old_key != object_key {
+                                    let _ = cos_client.delete_object(&old_key).await;
+                                }
+                            }
+                        }
+
+                        // Dequeue all pending uploads for this file.
+                        let _ = db.dequeue_upload(&entry.file_id);
+                    }
+                    Err(_) => {
+                        // Failure: increment retry_count and skip to next.
+                        let _ = db.increment_retry_count(entry.id);
+
+                        // Check if max retries exceeded.
+                        let new_retry_count = entry.retry_count + 1;
+                        if new_retry_count > entry.max_retries {
+                            // Mark file as Error status.
+                            let mut error_meta = meta.clone();
+                            error_meta.sync_status = SyncStatus::Error;
+                            let _ = db.upsert_file_meta(&error_meta);
+                        }
+                    }
+                }
             }
-            Err(_) => {
-                // Failure: increment retry_count and skip to next.
-                let _ = db.increment_retry_count(entry.id);
-
-                // Check if max retries exceeded.
-                let new_retry_count = entry.retry_count + 1;
-                if new_retry_count > entry.max_retries {
-                    // Mark file as Error status.
-                    let mut error_meta = meta.clone();
-                    error_meta.sync_status = SyncStatus::Error;
-                    let _ = db.upsert_file_meta(&error_meta);
+            UploadOperation::Delete => {
+                if let Some(key) = meta.cos_object_key.as_deref() {
+                    match cos_client.delete_object(key).await {
+                        Ok(()) => {
+                            let _ = db.dequeue_upload(&entry.file_id);
+                        }
+                        Err(_) => {
+                            let _ = db.increment_retry_count(entry.id);
+                        }
+                    }
+                } else {
+                    let _ = db.dequeue_upload(&entry.file_id);
                 }
             }
         }
@@ -1388,7 +1512,7 @@ mod tests {
         );
         assert_eq!(
             meta.cos_object_key,
-            Some(format!("files/{}.excalidraw", file_id))
+            Some("excalidraw/Untitled.excalidraw".to_string())
         );
         assert_eq!(meta.sync_status, crate::models::SyncStatus::PendingSync);
         assert_eq!(meta.title, "Untitled");
@@ -1699,7 +1823,10 @@ mod tests {
             result.files.iter().map(|e| (e.id.as_str(), e)).collect();
 
         assert_eq!(file_map["with-key"].object_key, "custom/path.excalidraw");
-        assert_eq!(file_map["no-key"].object_key, "files/no-key.excalidraw");
+        assert_eq!(
+            file_map["no-key"].object_key,
+            "excalidraw/Local no-key.excalidraw"
+        );
     }
 
     // --- upload_file tests (Task 7.3) ---
@@ -1925,6 +2052,34 @@ mod tests {
         let result = engine.load_canvas(file_id).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn download_canvas_always_attempts_remote_fetch() {
+        let engine = create_test_engine();
+        let file_id = "force-download";
+        let local_data = r#"{"type":"excalidraw","version":2,"elements":[{"id":"local"}]}"#;
+
+        engine.file_store.write_canvas(file_id, local_data).unwrap();
+
+        let meta = FileMeta {
+            id: file_id.to_string(),
+            title: "Force Download".to_string(),
+            last_modified: 1_700_000_000_000,
+            content_hash: crate::file_store::compute_content_hash(local_data),
+            cos_object_key: Some(format!("excalidraw/{}.excalidraw", file_id)),
+            sync_status: SyncStatus::Synced,
+            base_content_hash: Some("different-remote-hash".to_string()),
+            is_conflict_copy: false,
+            parent_file_id: None,
+            deleted: false,
+            created_at: 1_700_000_000_000,
+        };
+        engine.db.upsert_file_meta(&meta).unwrap();
+
+        let result = engine.download_canvas(file_id).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to download file"));
     }
 
     // --- detect_conflicts tests (Task 8.1) ---

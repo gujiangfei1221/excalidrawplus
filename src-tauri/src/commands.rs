@@ -13,6 +13,7 @@
 //! Task 10.2 implements file operation commands:
 //!   * `save_canvas` — save canvas data to local store and enqueue upload
 //!   * `load_canvas` — load canvas data with hash-based cache decision
+//!   * `download_canvas` — force-download canvas data from COS
 //!   * `create_new_file` — generate UUID v4 file ID and create empty canvas
 //!   * `delete_file` — soft-delete file and enqueue delete operation
 //!   * `rename_file` — validate title and update metadata
@@ -33,11 +34,12 @@ use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
+use tracing::{info, warn};
 
 use crate::cos_client::CosClient;
 use crate::file_store::compute_content_hash;
 use crate::models::{CosConfig, FileMeta, QueuedUpload, SyncStatus, UploadOperation};
-use crate::sync_engine::SyncEngine;
+use crate::sync_engine::{cos_object_key_for_title, SyncEngine};
 
 /// Application state managed by Tauri's state system.
 ///
@@ -64,6 +66,41 @@ pub(crate) fn validate_file_title(title: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn next_untitled_title(existing_files: &[FileMeta]) -> String {
+    let titles: std::collections::HashSet<&str> = existing_files
+        .iter()
+        .filter(|file| !file.deleted)
+        .map(|file| file.title.as_str())
+        .collect();
+
+    if !titles.contains("Untitled") {
+        return "Untitled".to_string();
+    }
+
+    for index in 2.. {
+        let candidate = format!("Untitled {index}");
+        if !titles.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+
+    unreachable!("unbounded loop should always return a title")
+}
+
+fn validate_unique_file_title(
+    existing_files: &[FileMeta],
+    current_file_id: &str,
+    title: &str,
+) -> Result<(), String> {
+    if existing_files.iter().any(|file| {
+        !file.deleted && file.id != current_file_id && file.title.eq_ignore_ascii_case(title)
+    }) {
+        return Err("A file with this title already exists".to_string());
+    }
+
+    Ok(())
+}
+
 // ── COS Configuration Commands (Task 10.1) ──────────────────────────
 
 /// Persist a COS configuration to the local SQLite database.
@@ -79,6 +116,7 @@ pub async fn save_cos_config(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    info!("save_cos_config requested");
     // Validate that all fields are non-empty
     if config.secret_id.trim().is_empty() {
         return Err("SecretId must not be empty".to_string());
@@ -101,6 +139,7 @@ pub async fn save_cos_config(
         .save_cos_config(&config)
         .map_err(|e| format!("Failed to save COS config: {e}"))?;
     engine.enable_cloud_sync(cos_client, app_handle)?;
+    info!("save_cos_config succeeded");
 
     Ok(())
 }
@@ -115,6 +154,7 @@ pub async fn save_cos_config(
 /// Validates: Requirements 2.3, 2.4
 #[tauri::command]
 pub async fn validate_cos_config(config: CosConfig) -> Result<bool, String> {
+    info!("validate_cos_config requested");
     // Validate that all fields are non-empty before attempting connection
     if config.secret_id.trim().is_empty() {
         return Err("SecretId must not be empty".to_string());
@@ -136,9 +176,16 @@ pub async fn validate_cos_config(config: CosConfig) -> Result<bool, String> {
     let result = timeout(Duration::from_secs(10), client.test_connection()).await;
 
     match result {
-        Ok(Ok(success)) => Ok(success),
-        Ok(Err(e)) => Err(format!("COS connection validation failed: {e}")),
+        Ok(Ok(success)) => {
+            info!(success, "validate_cos_config completed");
+            Ok(success)
+        }
+        Ok(Err(e)) => {
+            warn!(error = %e, "validate_cos_config failed");
+            Err(format!("COS connection validation failed: {e}"))
+        }
         Err(_) => {
+            warn!("validate_cos_config timed out");
             Err("COS connection validation timed out: no response within 10 seconds".to_string())
         }
     }
@@ -160,6 +207,7 @@ pub async fn validate_cos_config(config: CosConfig) -> Result<bool, String> {
 pub async fn get_cos_config(
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<CosConfig>, String> {
+    info!("get_cos_config requested");
     let engine = state.sync_engine.lock().await;
     engine
         .db
@@ -183,6 +231,7 @@ pub async fn save_canvas(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<SyncStatus, String> {
+    info!(file_id = %file_id, "save_canvas requested");
     let engine = state.sync_engine.lock().await;
     let status = engine.save_canvas(&file_id, &data).await?;
     let _ = app_handle.emit(
@@ -190,6 +239,7 @@ pub async fn save_canvas(
         serde_json::json!({ "fileId": file_id, "status": status }),
     );
     let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
+    info!(file_id = %file_id, status = ?status, "save_canvas completed");
     Ok(status)
 }
 
@@ -205,8 +255,39 @@ pub async fn load_canvas(
     file_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
+    info!(file_id = %file_id, "load_canvas requested");
     let engine = state.sync_engine.lock().await;
     engine.load_canvas(&file_id).await
+}
+
+/// Force-download canvas data for a given file ID.
+///
+/// Delegates to `SyncEngine::download_canvas`, which always fetches the
+/// remote object from COS and overwrites the local cache.
+#[tauri::command]
+pub async fn download_canvas(
+    file_id: String,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    info!(file_id = %file_id, "download_canvas requested");
+    let engine = state.sync_engine.lock().await;
+    let content = engine.download_canvas(&file_id).await?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let _ = app_handle.emit(
+        SYNC_STATUS_EVENT,
+        serde_json::json!({
+            "fileId": file_id,
+            "status": SyncStatus::Synced,
+            "lastSyncTime": now_ms,
+        }),
+    );
+    let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
+    info!(file_id = %file_id, "download_canvas completed");
+    Ok(content)
 }
 
 /// Create a new file with a unique UUID v4 ID and empty canvas data.
@@ -224,6 +305,7 @@ pub async fn create_new_file(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<FileEntry, String> {
+    info!("create_new_file requested");
     let file_id = uuid::Uuid::new_v4().to_string();
 
     // Empty canvas data matching the Excalidraw file format.
@@ -237,16 +319,21 @@ pub async fn create_new_file(
         .unwrap_or(0);
 
     let engine = state.sync_engine.lock().await;
+    let existing_files = engine
+        .db
+        .get_all_files()
+        .map_err(|e| format!("Failed to get existing files: {}", e))?;
+    let title = next_untitled_title(&existing_files);
     let is_cloud_sync_enabled = engine.is_cloud_sync_enabled();
     let cos_object_key = if is_cloud_sync_enabled {
-        Some(format!("files/{}.excalidraw", file_id))
+        Some(cos_object_key_for_title(&title))
     } else {
         None
     };
 
     let meta = FileMeta {
         id: file_id.clone(),
-        title: "Untitled".to_string(),
+        title,
         last_modified: now_ms,
         content_hash: content_hash.clone(),
         cos_object_key,
@@ -297,6 +384,7 @@ pub async fn create_new_file(
 
     let entry = file_meta_to_entry(&meta);
     let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
+    info!(file_id = %file_id, "create_new_file completed");
 
     Ok(entry)
 }
@@ -314,6 +402,7 @@ pub async fn delete_file(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    info!(file_id = %file_id, "delete_file requested");
     let engine = state.sync_engine.lock().await;
     let is_cloud_sync_enabled = engine.is_cloud_sync_enabled();
 
@@ -328,6 +417,7 @@ pub async fn delete_file(
             .map_err(|e| format!("Failed to delete local file metadata: {}", e))?;
 
         let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
+        info!(file_id = %file_id, "delete_file completed locally");
         return Ok(());
     }
 
@@ -374,6 +464,7 @@ pub async fn delete_file(
         .map_err(|e| format!("Failed to enqueue delete operation: {}", e))?;
 
     let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
+    info!(file_id = %file_id, "delete_file completed");
 
     Ok(())
 }
@@ -395,10 +486,16 @@ pub async fn rename_file(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    info!(file_id = %file_id, "rename_file requested");
     validate_file_title(&new_title)?;
 
     let engine = state.sync_engine.lock().await;
     let is_cloud_sync_enabled = engine.is_cloud_sync_enabled();
+    let existing_files = engine
+        .db
+        .get_all_files()
+        .map_err(|e| format!("Failed to get existing files: {}", e))?;
+    validate_unique_file_title(&existing_files, &file_id, &new_title)?;
 
     // Get existing metadata.
     let mut meta = engine
@@ -407,8 +504,15 @@ pub async fn rename_file(
         .map_err(|e| format!("Failed to get file metadata: {}", e))?
         .ok_or_else(|| format!("File not found: {}", file_id))?;
 
+    let old_cos_object_key = meta.cos_object_key.clone();
+
     // Update title and last_modified.
     meta.title = new_title.clone();
+    meta.cos_object_key = if is_cloud_sync_enabled {
+        Some(cos_object_key_for_title(&new_title))
+    } else {
+        meta.cos_object_key
+    };
     meta.sync_status = if is_cloud_sync_enabled {
         SyncStatus::PendingSync
     } else {
@@ -425,7 +529,11 @@ pub async fn rename_file(
         .map_err(|e| format!("Failed to update file metadata: {}", e))?;
 
     if is_cloud_sync_enabled {
-        let payload = serde_json::json!({ "newTitle": new_title }).to_string();
+        let payload = serde_json::json!({
+            "newTitle": new_title,
+            "oldObjectKey": old_cos_object_key,
+        })
+        .to_string();
         let upload_entry = QueuedUpload {
             id: 0,
             file_id: file_id.clone(),
@@ -443,6 +551,7 @@ pub async fn rename_file(
     }
 
     let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
+    info!(file_id = %file_id, "rename_file completed");
 
     Ok(())
 }
@@ -605,7 +714,11 @@ pub async fn get_file_list(state: tauri::State<'_, AppState>) -> Result<Vec<File
         .get_all_files()
         .map_err(|e| format!("Failed to get file list: {}", e))?;
 
-    let entries: Vec<FileEntry> = files.iter().map(file_meta_to_entry).collect();
+    let entries: Vec<FileEntry> = files
+        .iter()
+        .filter(|file| !file.deleted)
+        .map(file_meta_to_entry)
+        .collect();
     Ok(entries)
 }
 

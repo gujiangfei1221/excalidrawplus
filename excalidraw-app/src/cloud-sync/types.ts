@@ -75,7 +75,9 @@ export interface FileListSidebarProps {
   activeFileId: string | null;
   deletingFileIds?: ReadonlySet<string>;
   isCloudSyncEnabled?: boolean;
+  isCollapsed: boolean;
   onOpenSettings?: () => void;
+  onToggleCollapse: () => void;
   onFileSelect: (fileId: string) => void;
   onFileRename: (fileId: string, newTitle: string) => void;
   onFileDelete: (fileId: string) => void;

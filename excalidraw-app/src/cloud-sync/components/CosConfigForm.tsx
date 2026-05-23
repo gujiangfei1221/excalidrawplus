@@ -98,9 +98,14 @@ export const CosConfigForm = ({
           </button>
         )}
         <button disabled={isSubmitting} type="submit">
-          {isSubmitting ? "Validating..." : "Connect"}
+          {isSubmitting ? "Connecting..." : "Connect"}
         </button>
       </div>
+      {isSubmitting && (
+        <p className="cloud-sync-config__status" role="status">
+          Checking the COS connection. This can take up to 10 seconds.
+        </p>
+      )}
     </form>
   );
 };

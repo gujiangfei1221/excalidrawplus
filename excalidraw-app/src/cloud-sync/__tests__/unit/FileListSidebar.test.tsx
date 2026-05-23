@@ -26,10 +26,12 @@ describe("FileListSidebar", () => {
       <FileListSidebar
         activeFileId="new"
         files={files}
+        isCollapsed={false}
         onFileDelete={() => {}}
         onFileRename={() => {}}
         onFileSelect={() => {}}
         onNewFile={() => {}}
+        onToggleCollapse={() => {}}
       />,
     );
 
@@ -43,15 +45,56 @@ describe("FileListSidebar", () => {
       <FileListSidebar
         activeFileId={null}
         files={files}
+        isCollapsed={false}
         onFileDelete={() => {}}
         onFileRename={() => {}}
         onFileSelect={() => {}}
         onNewFile={onNewFile}
+        onToggleCollapse={() => {}}
       />,
     );
 
     fireEvent.click(screen.getByLabelText("New file"));
 
     expect(onNewFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggles collapsed state", () => {
+    const onToggleCollapse = vi.fn();
+    render(
+      <FileListSidebar
+        activeFileId={null}
+        files={files}
+        isCollapsed={false}
+        onFileDelete={() => {}}
+        onFileRename={() => {}}
+        onFileSelect={() => {}}
+        onNewFile={() => {}}
+        onToggleCollapse={onToggleCollapse}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("Collapse sidebar"));
+
+    expect(onToggleCollapse).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders file status as a color dot without visible text", () => {
+    render(
+      <FileListSidebar
+        activeFileId="new"
+        files={files}
+        isCollapsed={false}
+        onFileDelete={() => {}}
+        onFileRename={() => {}}
+        onFileSelect={() => {}}
+        onNewFile={() => {}}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    const status = screen.getByLabelText("Pending sync");
+    expect(status).toHaveTextContent("");
+    expect(status).toHaveClass("cloud-sync-file__status", "is-pending-sync");
   });
 });
