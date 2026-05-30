@@ -54,6 +54,7 @@ export const cloudSyncBridge = {
   downloadCanvas: (fileId: string) =>
     invoke<string>("download_canvas", { fileId }),
   createNewFile: () => invoke<FileEntry>("create_new_file"),
+  importFile: () => invoke<FileEntry | null>("import_file"),
   deleteFile: (fileId: string) => invoke<void>("delete_file", { fileId }),
   renameFile: (fileId: string, newTitle: string) =>
     invoke<void>("rename_file", { fileId, newTitle }),

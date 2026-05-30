@@ -243,7 +243,7 @@ impl SyncEngine {
     pub fn enable_cloud_sync(
         &mut self,
         cos_client: CosClient,
-        app_handle: AppHandle,
+        _app_handle: AppHandle,
     ) -> Result<(), String> {
         self.stop();
 
@@ -252,7 +252,6 @@ impl SyncEngine {
         self.conn_monitor = Arc::new(ConnectivityMonitor::new(cos_client));
         self.cloud_sync_enabled = true;
         self.enqueue_local_files_for_sync()?;
-        self.start(app_handle);
 
         Ok(())
     }
@@ -425,7 +424,9 @@ impl SyncEngine {
         }
 
         // 1. Check connectivity — if offline, return early with PendingSync.
-        if !self.conn_monitor.is_online() {
+        if !self.conn_monitor.is_online()
+            && !self.cos_client.test_connection().await.unwrap_or(false)
+        {
             return Ok(SyncStatus::PendingSync);
         }
 
@@ -715,7 +716,9 @@ impl SyncEngine {
         }
 
         // 1. Check connectivity — if offline, return early.
-        if !self.conn_monitor.is_online() {
+        if !self.conn_monitor.is_online()
+            && !self.cos_client.test_connection().await.unwrap_or(false)
+        {
             return Ok(());
         }
 

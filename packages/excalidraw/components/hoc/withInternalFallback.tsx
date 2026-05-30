@@ -48,7 +48,11 @@ export const withInternalFallback = <P,>(
           return next;
         });
       };
-    }, [setCounter]);
+      // Track the fallback/host registration for this component instance only.
+      // Some renderers don't keep the Jotai setter identity stable, and rerunning
+      // this effect on every render causes a render loop.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     if (!props.__fallback) {
       metaRef.current.preferHost = true;

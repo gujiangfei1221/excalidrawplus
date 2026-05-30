@@ -44,6 +44,7 @@ pub fn run() {
             commands::load_canvas,
             commands::download_canvas,
             commands::create_new_file,
+            commands::import_file,
             commands::delete_file,
             commands::rename_file,
             commands::export_file,
@@ -78,8 +79,7 @@ fn setup_cloud_sync(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
         sync_engine.set_cloud_sync_enabled(has_cos_config);
 
         if has_cos_config {
-            tracing::info!("COS config found, starting sync engine");
-            sync_engine.start(app.handle().clone());
+            tracing::info!("COS config found, manual sync is ready");
         } else {
             tracing::info!("no COS config found, starting in disconnected mode");
         }

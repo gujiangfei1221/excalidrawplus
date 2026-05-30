@@ -16,11 +16,11 @@ describe("CosConfigForm", () => {
     const onSubmit = vi.fn();
     render(<CosConfigForm onSubmit={onSubmit} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
 
     expect(onSubmit).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "All COS fields are required.",
+      "请填写所有 COS 字段。",
     );
   });
 

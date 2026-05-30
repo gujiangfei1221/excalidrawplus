@@ -27,6 +27,7 @@
 //! Validates: Requirements 2.2, 2.3, 2.4, 2.5, 2.6, 3.4, 5.1, 4.1,
 //!            9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 5.5, 5.6
 
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -73,13 +74,40 @@ fn next_untitled_title(existing_files: &[FileMeta]) -> String {
         .map(|file| file.title.as_str())
         .collect();
 
-    if !titles.contains("Untitled") {
-        return "Untitled".to_string();
+    if !titles.contains("未命名") {
+        return "未命名".to_string();
     }
 
     for index in 2.. {
-        let candidate = format!("Untitled {index}");
+        let candidate = format!("未命名 {index}");
         if !titles.contains(candidate.as_str()) {
+            return candidate;
+        }
+    }
+
+    unreachable!("unbounded loop should always return a title")
+}
+
+fn unique_title_from_base(existing_files: &[FileMeta], base_title: &str) -> String {
+    let trimmed_title = base_title.trim();
+    let base_title = if trimmed_title.is_empty() {
+        "未命名"
+    } else {
+        trimmed_title
+    };
+    let titles: std::collections::HashSet<String> = existing_files
+        .iter()
+        .filter(|file| !file.deleted)
+        .map(|file| file.title.to_lowercase())
+        .collect();
+
+    if !titles.contains(&base_title.to_lowercase()) {
+        return base_title.to_string();
+    }
+
+    for index in 2.. {
+        let candidate = format!("{base_title} {index}");
+        if !titles.contains(&candidate.to_lowercase()) {
             return candidate;
         }
     }
@@ -99,6 +127,17 @@ fn validate_unique_file_title(
     }
 
     Ok(())
+}
+
+fn title_from_import_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("未命名")
+        .chars()
+        .take(100)
+        .collect()
 }
 
 // ── COS Configuration Commands (Task 10.1) ──────────────────────────
@@ -387,6 +426,109 @@ pub async fn create_new_file(
     info!(file_id = %file_id, "create_new_file completed");
 
     Ok(entry)
+}
+
+/// Import an existing `.excalidraw` file into the managed local library.
+#[tauri::command]
+pub async fn import_file(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<FileEntry>, String> {
+    info!("import_file requested");
+
+    let file_path = app_handle
+        .dialog()
+        .file()
+        .add_filter("Excalidraw Files", &["excalidraw"])
+        .blocking_pick_file();
+
+    let file_path = match file_path {
+        Some(file_path) => file_path,
+        None => return Ok(None),
+    };
+
+    let path = file_path
+        .as_path()
+        .ok_or_else(|| "Selected path is not a valid filesystem path".to_string())?;
+    let canvas_data =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read import file: {}", e))?;
+
+    serde_json::from_str::<serde_json::Value>(&canvas_data)
+        .map_err(|e| format!("Selected file is not valid JSON: {}", e))?;
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let content_hash = compute_content_hash(&canvas_data);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let engine = state.sync_engine.lock().await;
+    let existing_files = engine
+        .db
+        .get_all_files()
+        .map_err(|e| format!("Failed to get existing files: {}", e))?;
+    let title = unique_title_from_base(&existing_files, &title_from_import_path(path));
+    let is_cloud_sync_enabled = engine.is_cloud_sync_enabled();
+    let cos_object_key = if is_cloud_sync_enabled {
+        Some(cos_object_key_for_title(&title))
+    } else {
+        None
+    };
+
+    let meta = FileMeta {
+        id: file_id.clone(),
+        title,
+        last_modified: now_ms,
+        content_hash: content_hash.clone(),
+        cos_object_key,
+        sync_status: if is_cloud_sync_enabled {
+            SyncStatus::PendingSync
+        } else {
+            SyncStatus::Synced
+        },
+        base_content_hash: if is_cloud_sync_enabled {
+            None
+        } else {
+            Some(content_hash)
+        },
+        is_conflict_copy: false,
+        parent_file_id: None,
+        deleted: false,
+        created_at: now_ms,
+    };
+
+    engine
+        .file_store
+        .write_canvas(&file_id, &canvas_data)
+        .map_err(|e| format!("Failed to copy imported canvas: {}", e))?;
+    engine
+        .db
+        .upsert_file_meta(&meta)
+        .map_err(|e| format!("Failed to save imported file metadata: {}", e))?;
+
+    if is_cloud_sync_enabled {
+        let upload_entry = QueuedUpload {
+            id: 0,
+            file_id: file_id.clone(),
+            operation: UploadOperation::Upload,
+            payload: None,
+            retry_count: 0,
+            max_retries: 5,
+            created_at: now_ms,
+        };
+
+        engine
+            .db
+            .enqueue_upload(&upload_entry)
+            .map_err(|e| format!("Failed to enqueue imported file upload: {}", e))?;
+    }
+
+    let entry = file_meta_to_entry(&meta);
+    let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
+    info!(file_id = %file_id, "import_file completed");
+
+    Ok(Some(entry))
 }
 
 /// Delete a file by marking it as deleted and enqueuing a delete operation.
@@ -735,7 +877,19 @@ pub async fn trigger_sync(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
     let engine = state.sync_engine.lock().await;
+    engine.process_upload_queue().await?;
     engine.sync_manifest().await?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let _ = app_handle.emit(
+        SYNC_STATUS_EVENT,
+        serde_json::json!({
+            "status": SyncStatus::Synced,
+            "lastSyncTime": now_ms,
+        }),
+    );
     let _ = app_handle.emit(FILE_LIST_CHANGED_EVENT, ());
     Ok(())
 }

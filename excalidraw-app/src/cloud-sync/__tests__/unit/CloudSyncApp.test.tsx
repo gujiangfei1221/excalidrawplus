@@ -12,17 +12,40 @@ const bridgeMocks = vi.hoisted(() => ({
   downloadCanvas: vi.fn(),
   getCosConfig: vi.fn(),
   getFileList: vi.fn(),
+  importFile: vi.fn(),
   loadCanvas: vi.fn(),
   saveCosConfig: vi.fn(),
+  triggerSync: vi.fn(),
   validateCosConfig: vi.fn(),
   saveCanvas: vi.fn(),
+}));
+
+const excalidrawMocks = vi.hoisted(() => ({
+  addFiles: vi.fn(),
+  onChange: undefined as
+    | ((elements: [], appState: {}, binaryFiles: {}) => void)
+    | undefined,
+  shouldThrow: false,
+  triggerOnUpdate: false,
+  updateScene: vi.fn(),
 }));
 
 vi.mock("@excalidraw/excalidraw", () => ({
   CaptureUpdateAction: {
     IMMEDIATELY: "IMMEDIATELY",
   },
-  Excalidraw: () => <div data-testid="excalidraw-editor" />,
+  Excalidraw: ({
+    onChange,
+  }: {
+    onChange: (elements: [], appState: {}, binaryFiles: {}) => void;
+  }) => {
+    if (excalidrawMocks.shouldThrow) {
+      throw new Error("Excalidraw failed");
+    }
+
+    excalidrawMocks.onChange = onChange;
+    return <div data-testid="excalidraw-editor" />;
+  },
   ExcalidrawAPIProvider: ({ children }: { children: ReactNode }) => (
     <>{children}</>
   ),
@@ -30,8 +53,8 @@ vi.mock("@excalidraw/excalidraw", () => ({
   restoreElements: (elements: unknown) => elements,
   serializeAsJSON: () => "{}",
   useExcalidrawAPI: () => ({
-    addFiles: vi.fn(),
-    updateScene: vi.fn(),
+    addFiles: excalidrawMocks.addFiles,
+    updateScene: excalidrawMocks.updateScene,
   }),
 }));
 
@@ -42,8 +65,10 @@ vi.mock("../../tauri-bridge", () => ({
     downloadCanvas: bridgeMocks.downloadCanvas,
     getCosConfig: bridgeMocks.getCosConfig,
     getFileList: bridgeMocks.getFileList,
+    importFile: bridgeMocks.importFile,
     loadCanvas: bridgeMocks.loadCanvas,
     saveCosConfig: bridgeMocks.saveCosConfig,
+    triggerSync: bridgeMocks.triggerSync,
     validateCosConfig: bridgeMocks.validateCosConfig,
     saveCanvas: bridgeMocks.saveCanvas,
   },
@@ -69,6 +94,14 @@ const onlyFile: FileEntry = {
 describe("CloudSyncApp file creation fallback", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    excalidrawMocks.onChange = undefined;
+    excalidrawMocks.shouldThrow = false;
+    excalidrawMocks.triggerOnUpdate = false;
+    excalidrawMocks.updateScene.mockImplementation(() => {
+      if (excalidrawMocks.triggerOnUpdate) {
+        excalidrawMocks.onChange?.([], {}, {});
+      }
+    });
     bridgeMocks.getCosConfig.mockResolvedValue(null);
     bridgeMocks.loadCanvas.mockResolvedValue(
       JSON.stringify({
@@ -87,6 +120,7 @@ describe("CloudSyncApp file creation fallback", () => {
       }),
     );
     bridgeMocks.saveCosConfig.mockResolvedValue(undefined);
+    bridgeMocks.triggerSync.mockResolvedValue(undefined);
     bridgeMocks.validateCosConfig.mockResolvedValue(true);
     bridgeMocks.saveCanvas.mockResolvedValue("pending-sync");
     vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -110,6 +144,31 @@ describe("CloudSyncApp file creation fallback", () => {
     });
   });
 
+  it("loads the active canvas only once across editor re-renders", async () => {
+    bridgeMocks.getFileList.mockResolvedValue([onlyFile]);
+    excalidrawMocks.triggerOnUpdate = true;
+
+    render(<CloudSyncApp />);
+
+    await waitFor(() => {
+      expect(bridgeMocks.loadCanvas).toHaveBeenCalledTimes(1);
+    });
+    expect(bridgeMocks.loadCanvas).toHaveBeenCalledWith(onlyFile.id);
+  });
+
+  it("shows a fallback instead of a blank screen on render errors", async () => {
+    bridgeMocks.getFileList.mockResolvedValue([onlyFile]);
+    excalidrawMocks.shouldThrow = true;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    render(<CloudSyncApp />);
+
+    expect(await screen.findByText(/云同步界面渲染失败/i)).toHaveAttribute(
+      "role",
+      "alert",
+    );
+  });
+
   it("does not auto-create a replacement when the user deletes the last file", async () => {
     bridgeMocks.getFileList
       .mockResolvedValueOnce([onlyFile])
@@ -117,7 +176,7 @@ describe("CloudSyncApp file creation fallback", () => {
 
     render(<CloudSyncApp />);
 
-    const deleteButton = await screen.findByLabelText("Delete Only file");
+    const deleteButton = await screen.findByLabelText("删除 Only file");
     fireEvent.click(deleteButton);
 
     await waitFor(() => {
@@ -128,7 +187,7 @@ describe("CloudSyncApp file creation fallback", () => {
     // intent and leave the list empty instead of spawning a replacement.
     expect(bridgeMocks.createNewFile).not.toHaveBeenCalled();
     await waitFor(() => {
-      expect(screen.getByText(/No files\./i)).toBeInTheDocument();
+      expect(screen.getByText(/暂无文件/i)).toBeInTheDocument();
     });
   });
 
@@ -147,7 +206,7 @@ describe("CloudSyncApp file creation fallback", () => {
 
     render(<CloudSyncApp />);
 
-    const deleteButton = await screen.findByLabelText("Delete Only file");
+    const deleteButton = await screen.findByLabelText("删除 Only file");
     fireEvent.click(deleteButton);
     await waitFor(() => expect(deleteButton).toBeDisabled());
     // Spam-click while the first delete is still in flight; these MUST be
@@ -168,7 +227,7 @@ describe("CloudSyncApp file creation fallback", () => {
 
     render(<CloudSyncApp />);
 
-    fireEvent.click(await screen.findByLabelText("Cloud sync settings"));
+    fireEvent.click(await screen.findByLabelText("设置"));
 
     fireEvent.change(screen.getByLabelText("SecretId"), {
       target: { value: "secret-id" },
@@ -182,7 +241,7 @@ describe("CloudSyncApp file creation fallback", () => {
     fireEvent.change(screen.getByLabelText("Region"), {
       target: { value: "ap-shanghai" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
 
     await waitFor(() => {
       expect(bridgeMocks.validateCosConfig).toHaveBeenCalledTimes(1);
@@ -190,10 +249,10 @@ describe("CloudSyncApp file creation fallback", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
-    expect(screen.getByText("Cloud Sync connected.")).toBeInTheDocument();
+    expect(screen.getByText("云同步已连接。")).toBeInTheDocument();
   });
 
-  it("shows manual save and download actions when cloud sync is enabled", async () => {
+  it("shows manual sync and download actions when cloud sync is enabled", async () => {
     bridgeMocks.getCosConfig.mockResolvedValueOnce({
       secretId: "secret-id",
       secretKey: "secret-key",
@@ -204,15 +263,17 @@ describe("CloudSyncApp file creation fallback", () => {
 
     render(<CloudSyncApp />);
 
-    const saveButton = await screen.findByRole("button", {
-      name: "保存云端",
+    const syncButton = await screen.findByRole("button", {
+      name: "手动同步",
     });
-    const downloadButton = screen.getByRole("button", { name: "下载本地" });
+    const downloadButton = await screen.findByRole("button", {
+      name: "下载云端",
+    });
 
-    fireEvent.click(saveButton);
+    fireEvent.click(syncButton);
 
     await waitFor(() => {
-      expect(bridgeMocks.saveCanvas).toHaveBeenCalledTimes(1);
+      expect(bridgeMocks.triggerSync).toHaveBeenCalledTimes(1);
     });
 
     fireEvent.click(downloadButton);

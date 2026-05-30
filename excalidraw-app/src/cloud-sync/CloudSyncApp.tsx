@@ -7,7 +7,14 @@ import {
   serializeAsJSON,
   useExcalidrawAPI,
 } from "@excalidraw/excalidraw";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Component,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import type { AppState, BinaryFiles } from "@excalidraw/excalidraw/types";
 import type { OrderedExcalidrawElement } from "@excalidraw/element/types";
@@ -20,6 +27,8 @@ import { cloudSyncBridge, listenToCloudSyncEvent } from "./tauri-bridge";
 import { countConflictCopies } from "./utils";
 
 import "./cloud-sync.scss";
+
+import type { ReactNode } from "react";
 
 import type { CosConfig, FileEntry, SyncStatus } from "./types";
 
@@ -48,6 +57,38 @@ const parseCanvas = (rawCanvas: string) => {
   }
 };
 
+const restoreCanvasAppState = (appState: Record<string, unknown> = {}) => {
+  const { collaborators, ...rest } = appState;
+  return restoreAppState(rest, null);
+};
+
+class CloudSyncErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error("[cloud-sync] render failed:", error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="cloud-sync-loading" role="alert">
+          云同步界面渲染失败，请重新打开应用。
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
 const CloudSyncEditor = ({
   isCloudSyncEnabled,
   onOpenSettings,
@@ -66,6 +107,7 @@ const CloudSyncEditor = ({
   const [error, setError] = useState("");
   const [isSavingToCloud, setIsSavingToCloud] = useState(false);
   const [isDownloadingToLocal, setIsDownloadingToLocal] = useState(false);
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [fileStatusOverrides, setFileStatusOverrides] = useState<
     Record<string, FileEntry["syncStatus"]>
@@ -205,7 +247,7 @@ const CloudSyncEditor = ({
           repairBindings: true,
           deleteInvisibleElements: true,
         }),
-        appState: restoreAppState(canvas.appState || {}, null),
+        appState: restoreCanvasAppState(canvas.appState),
         captureUpdate: CaptureUpdateAction.IMMEDIATELY,
       });
       if (canvas.files) {
@@ -230,6 +272,54 @@ const CloudSyncEditor = ({
       setIsDownloadingToLocal(false);
     }
   }, [activeFileId, excalidrawAPI, isDownloadingToLocal, refreshFiles]);
+
+  const syncToCloud = useCallback(async () => {
+    if (!isCloudSyncEnabled) {
+      onOpenSettings();
+      return;
+    }
+
+    if (isManualSyncing || isSavingToCloud || isDownloadingToLocal) {
+      return;
+    }
+
+    setError("");
+    setIsManualSyncing(true);
+    setStatus("saving");
+
+    try {
+      if (activeFileId && hasUnsavedChangesRef.current) {
+        await saveActiveCanvas();
+      }
+
+      await cloudSyncBridge.triggerSync();
+      const nextFiles = await refreshFiles();
+      const activeFile = activeFileId
+        ? nextFiles.find((file) => file.id === activeFileId)
+        : undefined;
+      const nextStatus = activeFile?.syncStatus ?? "synced";
+
+      setFileStatusOverrides({});
+      setStatus(nextStatus === "conflict" ? "pending-sync" : nextStatus);
+      if (nextStatus === "synced") {
+        setLastSyncTime(Date.now());
+      }
+    } catch (err: any) {
+      setStatus("error");
+      setError(err.message);
+    } finally {
+      setIsManualSyncing(false);
+    }
+  }, [
+    activeFileId,
+    isCloudSyncEnabled,
+    isDownloadingToLocal,
+    isManualSyncing,
+    isSavingToCloud,
+    onOpenSettings,
+    refreshFiles,
+    saveActiveCanvas,
+  ]);
 
   useEffect(() => {
     refreshFiles()
@@ -268,7 +358,7 @@ const CloudSyncEditor = ({
       console.debug("[cloud-sync] no active file, clearing editor");
       excalidrawAPI.updateScene({
         elements: [],
-        appState: restoreAppState({}, null),
+        appState: restoreCanvasAppState(),
         captureUpdate: CaptureUpdateAction.IMMEDIATELY,
       });
       latestCanvasRef.current = JSON.stringify(EMPTY_CANVAS);
@@ -286,7 +376,7 @@ const CloudSyncEditor = ({
           repairBindings: true,
           deleteInvisibleElements: true,
         }),
-        appState: restoreAppState(canvas.appState || {}, null),
+        appState: restoreCanvasAppState(canvas.appState),
         captureUpdate: CaptureUpdateAction.IMMEDIATELY,
       });
       if (canvas.files) {
@@ -308,7 +398,7 @@ const CloudSyncEditor = ({
             repairBindings: true,
             deleteInvisibleElements: true,
           }),
-          appState: restoreAppState(canvas.appState || {}, null),
+          appState: restoreCanvasAppState(canvas.appState),
           captureUpdate: CaptureUpdateAction.IMMEDIATELY,
         });
         if (canvas.files) {
@@ -322,7 +412,7 @@ const CloudSyncEditor = ({
         setStatus("error");
         setError(err.message);
       });
-  }, [activeFileId, excalidrawAPI]);
+  }, [activeFileId, excalidrawAPI, isCloudSyncEnabled]);
 
   useEffect(() => {
     if (!isCloudSyncEnabled) {
@@ -360,7 +450,13 @@ const CloudSyncEditor = ({
     appState: AppState,
     binaryFiles: BinaryFiles,
   ) => {
-    latestCanvasRef.current = serializeCanvas(elements, appState, binaryFiles);
+    const nextCanvas = serializeCanvas(elements, appState, binaryFiles);
+
+    if (nextCanvas === latestCanvasRef.current) {
+      return;
+    }
+
+    latestCanvasRef.current = nextCanvas;
 
     if (!activeFileId) {
       // No active file: don't schedule a save (it would either fail or, worse,
@@ -398,6 +494,21 @@ const CloudSyncEditor = ({
       const created = await cloudSyncBridge.createNewFile();
       setFiles((current) => [created, ...current]);
       setActiveFileId(created.id);
+    } catch (err: any) {
+      setStatus("error");
+      setError(err.message);
+    }
+  };
+
+  const importFile = async () => {
+    try {
+      const imported = await cloudSyncBridge.importFile();
+      if (!imported) {
+        return;
+      }
+      setFiles((current) => [imported, ...current]);
+      setActiveFileId(imported.id);
+      await refreshFiles();
     } catch (err: any) {
       setStatus("error");
       setError(err.message);
@@ -495,13 +606,12 @@ const CloudSyncEditor = ({
         isCollapsed={isSidebarCollapsed}
         isCloudSyncEnabled={isCloudSyncEnabled}
         onFileDelete={deleteFile}
+        onFileImport={importFile}
         onFileRename={renameFile}
         onFileSelect={selectFile}
         onNewFile={createFile}
         onOpenSettings={onOpenSettings}
-        onToggleCollapse={() =>
-          setIsSidebarCollapsed((current) => !current)
-        }
+        onToggleCollapse={() => setIsSidebarCollapsed((current) => !current)}
       />
       <main className="cloud-sync-editor">
         <div className="cloud-sync-toolbar">
@@ -509,28 +619,36 @@ const CloudSyncEditor = ({
             lastSyncTime={lastSyncTime}
             status={isCloudSyncEnabled ? status : "local-only"}
           />
-          {isCloudSyncEnabled && activeFileId && (
-            <div className="cloud-sync-toolbar__actions">
+          <div className="cloud-sync-toolbar__actions">
+            <button
+              disabled={
+                isCloudSyncEnabled &&
+                (isManualSyncing || isSavingToCloud || isDownloadingToLocal)
+              }
+              onClick={() => void syncToCloud()}
+              type="button"
+            >
+              {isCloudSyncEnabled
+                ? isManualSyncing
+                  ? "同步中..."
+                  : "手动同步"
+                : "同步云端"}
+            </button>
+            {isCloudSyncEnabled && activeFileId && (
               <button
-                disabled={isSavingToCloud || isDownloadingToLocal}
-                onClick={() => void saveActiveCanvas()}
-                type="button"
-              >
-                保存云端
-              </button>
-              <button
-                disabled={isSavingToCloud || isDownloadingToLocal}
+                disabled={
+                  isManualSyncing || isSavingToCloud || isDownloadingToLocal
+                }
                 onClick={() => void downloadActiveCanvas()}
                 type="button"
               >
-                下载本地
+                下载云端
               </button>
-            </div>
-          )}
+            )}
+          </div>
           {activeConflictCount > 0 && (
             <div className="cloud-sync-conflicts" role="status">
-              {activeConflictCount} conflict copy
-              {activeConflictCount > 1 ? "ies" : ""}
+              {activeConflictCount} 个冲突副本
             </div>
           )}
           {error && (
@@ -586,11 +704,11 @@ export const CloudSyncApp = () => {
 
   const submitConfig = async (config: CosConfig) => {
     setConfigError("");
-    setConnectionNotice("Checking the COS connection...");
+    setConnectionNotice("正在验证 COS 连接...");
     try {
       await cloudSyncBridge.validateCosConfig(config);
       await cloudSyncBridge.saveCosConfig(config);
-      setConnectionNotice("Cloud Sync connected.");
+      setConnectionNotice("云同步已连接。");
       setCosConfig(config);
       setIsSettingsOpen(false);
     } catch (err: any) {
@@ -600,33 +718,43 @@ export const CloudSyncApp = () => {
   };
 
   if (isLoading) {
-    return <div className="cloud-sync-loading">Loading...</div>;
+    return <div className="cloud-sync-loading">加载中...</div>;
   }
 
   return (
-    <ExcalidrawAPIProvider>
-      <CloudSyncEditor
-        isCloudSyncEnabled={!!cosConfig}
-        connectionNotice={connectionNotice}
-        onOpenSettings={() => {
-          setConfigError("");
-          setConnectionNotice("");
-          setIsSettingsOpen(true);
-        }}
-      />
-      {isSettingsOpen && (
-        <div className="cloud-sync-settings" role="dialog">
-          <CosConfigForm
-            error={configError}
-            initialValues={cosConfig ?? undefined}
-            onCancel={() => {
-              setConfigError("");
-              setIsSettingsOpen(false);
-            }}
-            onSubmit={submitConfig}
-          />
-        </div>
-      )}
-    </ExcalidrawAPIProvider>
+    <CloudSyncErrorBoundary>
+      <ExcalidrawAPIProvider>
+        <CloudSyncEditor
+          isCloudSyncEnabled={!!cosConfig}
+          connectionNotice={connectionNotice}
+          onOpenSettings={() => {
+            setConfigError("");
+            setConnectionNotice("");
+            setIsSettingsOpen(true);
+          }}
+        />
+        {isSettingsOpen && (
+          <div aria-label="设置" className="cloud-sync-settings" role="dialog">
+            <div className="cloud-sync-settings__panel">
+              <nav className="cloud-sync-settings__menu">
+                <strong>设置</strong>
+                <button className="is-active" type="button">
+                  COS 设置
+                </button>
+              </nav>
+              <CosConfigForm
+                error={configError}
+                initialValues={cosConfig ?? undefined}
+                onCancel={() => {
+                  setConfigError("");
+                  setIsSettingsOpen(false);
+                }}
+                onSubmit={submitConfig}
+              />
+            </div>
+          </div>
+        )}
+      </ExcalidrawAPIProvider>
+    </CloudSyncErrorBoundary>
   );
 };

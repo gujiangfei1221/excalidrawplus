@@ -1,4 +1,5 @@
 import { useState } from "react";
+
 import type { ChangeEvent, FormEvent } from "react";
 
 import type { CosConfig, CosConfigFormProps } from "../types";
@@ -33,7 +34,7 @@ export const CosConfigForm = ({
     event.preventDefault();
 
     if (Object.values(values).some((value) => !value.trim())) {
-      setLocalError("All COS fields are required.");
+      setLocalError("请填写所有 COS 字段。");
       return;
     }
 
@@ -47,7 +48,7 @@ export const CosConfigForm = ({
 
   return (
     <form className="cloud-sync-config" onSubmit={handleSubmit}>
-      <h1>Cloud Sync</h1>
+      <h1>COS 设置</h1>
       <label>
         SecretId
         <input
@@ -94,16 +95,16 @@ export const CosConfigForm = ({
       <div className="cloud-sync-config__actions">
         {onCancel && (
           <button onClick={onCancel} type="button">
-            Cancel
+            取消
           </button>
         )}
         <button disabled={isSubmitting} type="submit">
-          {isSubmitting ? "Connecting..." : "Connect"}
+          {isSubmitting ? "连接中..." : "保存配置"}
         </button>
       </div>
       {isSubmitting && (
         <p className="cloud-sync-config__status" role="status">
-          Checking the COS connection. This can take up to 10 seconds.
+          正在验证 COS 连接，最多可能需要 10 秒。
         </p>
       )}
     </form>

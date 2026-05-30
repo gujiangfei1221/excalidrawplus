@@ -81,6 +81,7 @@ export interface FileListSidebarProps {
   onFileSelect: (fileId: string) => void;
   onFileRename: (fileId: string, newTitle: string) => void;
   onFileDelete: (fileId: string) => void;
+  onFileImport: () => void;
   onNewFile: () => void;
 }
 

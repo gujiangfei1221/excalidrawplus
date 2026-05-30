@@ -19,11 +19,11 @@ export const validateFileTitle = (title: string) => {
   const trimmed = title.trim();
 
   if (!trimmed) {
-    return "Title must not be empty.";
+    return "文件名不能为空。";
   }
 
   if (title.length > MAX_FILE_TITLE_LENGTH) {
-    return "Title must be 100 characters or fewer.";
+    return "文件名不能超过 100 个字符。";
   }
 
   return null;
@@ -36,21 +36,21 @@ export const formatRelativeTime = (timestamp: number, now = Date.now()) => {
   const day = 24 * hour;
 
   if (diffMs < minute) {
-    return "just now";
+    return "刚刚";
   }
 
   if (diffMs < hour) {
     const minutes = Math.floor(diffMs / minute);
-    return `${minutes}m ago`;
+    return `${minutes} 分钟前`;
   }
 
   if (diffMs < day) {
     const hours = Math.floor(diffMs / hour);
-    return `${hours}h ago`;
+    return `${hours} 小时前`;
   }
 
   const days = Math.floor(diffMs / day);
-  return `${days}d ago`;
+  return `${days} 天前`;
 };
 
 export const countConflictCopies = (

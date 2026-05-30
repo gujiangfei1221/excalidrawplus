@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 
 import { FileListSidebar } from "../../components/FileListSidebar";
+
 import type { FileEntry } from "../../types";
 
 const files: FileEntry[] = [
@@ -28,6 +29,7 @@ describe("FileListSidebar", () => {
         files={files}
         isCollapsed={false}
         onFileDelete={() => {}}
+        onFileImport={() => {}}
         onFileRename={() => {}}
         onFileSelect={() => {}}
         onNewFile={() => {}}
@@ -47,6 +49,7 @@ describe("FileListSidebar", () => {
         files={files}
         isCollapsed={false}
         onFileDelete={() => {}}
+        onFileImport={() => {}}
         onFileRename={() => {}}
         onFileSelect={() => {}}
         onNewFile={onNewFile}
@@ -54,9 +57,30 @@ describe("FileListSidebar", () => {
       />,
     );
 
-    fireEvent.click(screen.getByLabelText("New file"));
+    fireEvent.click(screen.getByLabelText("新建文件"));
 
     expect(onNewFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("invokes import file action", () => {
+    const onFileImport = vi.fn();
+    render(
+      <FileListSidebar
+        activeFileId={null}
+        files={files}
+        isCollapsed={false}
+        onFileDelete={() => {}}
+        onFileImport={onFileImport}
+        onFileRename={() => {}}
+        onFileSelect={() => {}}
+        onNewFile={() => {}}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("导入文件"));
+
+    expect(onFileImport).toHaveBeenCalledTimes(1);
   });
 
   it("toggles collapsed state", () => {
@@ -67,6 +91,7 @@ describe("FileListSidebar", () => {
         files={files}
         isCollapsed={false}
         onFileDelete={() => {}}
+        onFileImport={() => {}}
         onFileRename={() => {}}
         onFileSelect={() => {}}
         onNewFile={() => {}}
@@ -74,7 +99,7 @@ describe("FileListSidebar", () => {
       />,
     );
 
-    fireEvent.click(screen.getByLabelText("Collapse sidebar"));
+    fireEvent.click(screen.getByLabelText("收起侧边栏"));
 
     expect(onToggleCollapse).toHaveBeenCalledTimes(1);
   });
@@ -86,6 +111,7 @@ describe("FileListSidebar", () => {
         files={files}
         isCollapsed={false}
         onFileDelete={() => {}}
+        onFileImport={() => {}}
         onFileRename={() => {}}
         onFileSelect={() => {}}
         onNewFile={() => {}}
@@ -93,7 +119,7 @@ describe("FileListSidebar", () => {
       />,
     );
 
-    const status = screen.getByLabelText("Pending sync");
+    const status = screen.getByLabelText("待同步");
     expect(status).toHaveTextContent("");
     expect(status).toHaveClass("cloud-sync-file__status", "is-pending-sync");
   });
