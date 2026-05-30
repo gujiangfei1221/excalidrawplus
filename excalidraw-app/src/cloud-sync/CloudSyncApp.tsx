@@ -170,7 +170,7 @@ const CloudSyncEditor = ({
         ...current,
         [activeFileId]: nextStatus,
       }));
-      setStatus(nextStatus);
+      setStatus(nextStatus === "conflict" ? "pending-sync" : nextStatus);
       if (nextStatus === "synced") {
         setLastSyncTime(Date.now());
       }
@@ -339,11 +339,12 @@ const CloudSyncEditor = ({
       return;
     }
 
-    setStatus(
+    const fileStatus =
       fileStatusOverrides[activeFileId] ??
-        files.find((file) => file.id === activeFileId)?.syncStatus ??
-        "synced",
-    );
+      files.find((file) => file.id === activeFileId)?.syncStatus ??
+      "synced";
+
+    setStatus(fileStatus === "conflict" ? "pending-sync" : fileStatus);
   }, [
     activeFileId,
     fileStatusOverrides,

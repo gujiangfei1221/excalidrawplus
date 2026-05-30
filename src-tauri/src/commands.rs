@@ -760,3 +760,33 @@ pub async fn get_sync_status(
 
     Ok(meta.sync_status)
 }
+
+#[tauri::command]
+pub async fn log_frontend_error(
+    message: String,
+    stack: Option<String>,
+    component_stack: Option<String>,
+) -> Result<(), String> {
+    if let Some(stack) = stack {
+        if let Some(component_stack) = component_stack {
+            tracing::error!(
+                message = %message,
+                stack = %stack,
+                component_stack = %component_stack,
+                "frontend error"
+            );
+        } else {
+            tracing::error!(message = %message, stack = %stack, "frontend error");
+        }
+    } else if let Some(component_stack) = component_stack {
+        tracing::error!(
+            message = %message,
+            component_stack = %component_stack,
+            "frontend error"
+        );
+    } else {
+        tracing::error!(message = %message, "frontend error");
+    }
+
+    Ok(())
+}

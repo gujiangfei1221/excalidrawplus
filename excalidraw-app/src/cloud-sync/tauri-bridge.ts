@@ -1,4 +1,4 @@
-import type { CosConfig, FileEntry, SyncStatus } from "./types";
+import type { CosConfig, FileEntry, FileSyncStatus, SyncStatus } from "./types";
 
 type Unlisten = () => void;
 
@@ -49,7 +49,7 @@ export const cloudSyncBridge = {
     invoke<boolean>("validate_cos_config", { config }),
   getCosConfig: () => invoke<CosConfig | null>("get_cos_config"),
   saveCanvas: (fileId: string, data: string) =>
-    invoke<SyncStatus>("save_canvas", { fileId, data }),
+    invoke<FileSyncStatus>("save_canvas", { fileId, data }),
   loadCanvas: (fileId: string) => invoke<string>("load_canvas", { fileId }),
   downloadCanvas: (fileId: string) =>
     invoke<string>("download_canvas", { fileId }),

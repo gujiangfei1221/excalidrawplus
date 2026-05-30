@@ -50,6 +50,7 @@ pub fn run() {
             commands::get_file_list,
             commands::trigger_sync,
             commands::get_sync_status,
+            commands::log_frontend_error,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
