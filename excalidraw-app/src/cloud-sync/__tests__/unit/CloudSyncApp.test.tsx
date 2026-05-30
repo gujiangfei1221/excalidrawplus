@@ -179,6 +179,12 @@ describe("CloudSyncApp file creation fallback", () => {
     const deleteButton = await screen.findByLabelText("删除 Only file");
     fireEvent.click(deleteButton);
 
+    // Confirm in the deletion dialog
+    const confirmButton = await screen.findByRole("button", {
+      name: "确认删除",
+    });
+    fireEvent.click(confirmButton);
+
     await waitFor(() => {
       expect(bridgeMocks.deleteFile).toHaveBeenCalledTimes(1);
     });
@@ -208,6 +214,13 @@ describe("CloudSyncApp file creation fallback", () => {
 
     const deleteButton = await screen.findByLabelText("删除 Only file");
     fireEvent.click(deleteButton);
+
+    // Confirm in the deletion dialog
+    const confirmButton = await screen.findByRole("button", {
+      name: "确认删除",
+    });
+    fireEvent.click(confirmButton);
+
     await waitFor(() => expect(deleteButton).toBeDisabled());
     // Spam-click while the first delete is still in flight; these MUST be
     // ignored — they used to indirectly trigger fallback file creation.
@@ -264,10 +277,10 @@ describe("CloudSyncApp file creation fallback", () => {
     render(<CloudSyncApp />);
 
     const syncButton = await screen.findByRole("button", {
-      name: "手动同步",
+      name: "Push 推送",
     });
     const downloadButton = await screen.findByRole("button", {
-      name: "下载云端",
+      name: "Pull 拉取",
     });
 
     fireEvent.click(syncButton);

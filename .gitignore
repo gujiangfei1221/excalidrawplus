@@ -33,3 +33,4 @@ src-tauri/target/
 src-tauri/gen/schemas/
 src-tauri/**/*.rs.bk
 *.pdb
+.kiro
