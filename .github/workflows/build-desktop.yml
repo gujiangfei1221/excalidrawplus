@@ -53,14 +53,15 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Build frontend
-        run: yarn build
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          projectPath: src-tauri
           tauriScript: cargo tauri
           args: --target ${{ matrix.target }}
 
