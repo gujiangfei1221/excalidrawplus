@@ -79,6 +79,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     name: Create Release
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -108,6 +110,8 @@ jobs:
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: "Desktop Build ${{ steps.tag.outputs.tag }}"
