@@ -2,8 +2,8 @@ name: Build Desktop App
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -91,10 +91,6 @@ jobs:
         with:
           path: artifacts
 
-      - name: Generate release tag
-        id: tag
-        run: echo "tag=build-$(date +'%Y%m%d-%H%M%S')-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-
       - name: Collect release files
         run: |
           mkdir -p release-files
@@ -113,15 +109,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: "Desktop Build ${{ steps.tag.outputs.tag }}"
+          tag_name: ${{ github.ref_name }}
+          name: "Excalidraw Desktop ${{ github.ref_name }}"
           body: |
-            自动构建 — 提交 ${{ github.sha }}
+            ## 下载说明
 
-            **下载说明：**
-            - macOS ARM (M系列芯片): `*.dmg` 或 `*.app.zip` (arm64)
-            - macOS Intel: `*.dmg` 或 `*.app.zip` (x64)
-            - Windows: `*-setup.exe` (NSIS) 或 `*.msi`
+            - **macOS ARM (M系列芯片)**: `*aarch64.dmg` 或 `*macOS-arm64.app.zip`
+            - **macOS Intel**: `*x64.dmg` 或 `*macOS-x64.app.zip`
+            - **Windows**: `*-setup.exe` (NSIS) 或 `*.msi`
 
             > macOS 首次打开未签名应用：右键点击 → 打开
           files: release-files/*
