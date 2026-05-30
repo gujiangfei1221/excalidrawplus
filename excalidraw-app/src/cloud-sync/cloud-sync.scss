@@ -109,7 +109,7 @@
   stroke: currentColor;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 1.9;
+  stroke-width: 2;
 }
 
 .cloud-sync-file-list {
@@ -243,10 +243,6 @@
 
 .cloud-sync-canvas .excalidraw {
   height: 100%;
-}
-
-.cloud-sync-canvas .main-menu-trigger {
-  display: none;
 }
 
 .cloud-sync-status {
@@ -404,4 +400,81 @@
   padding: 4px 8px;
   color: #633c01;
   font-size: 13px;
+}
+
+.cloud-sync-confirm {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgb(31 35 40 / 35%);
+}
+
+.cloud-sync-confirm__panel {
+  display: flex;
+  box-sizing: border-box;
+  width: min(420px, calc(100vw - 32px));
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid #d8dee4;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 20px;
+  box-shadow: 0 16px 48px rgb(31 35 40 / 18%);
+}
+
+.cloud-sync-confirm__panel strong {
+  font-size: 16px;
+}
+
+.cloud-sync-confirm__message {
+  margin: 0;
+  font-size: 14px;
+  color: #1f2328;
+  word-break: break-word;
+}
+
+.cloud-sync-confirm__warning {
+  margin: 0;
+  border-radius: 6px;
+  background: #ffebe9;
+  padding: 8px 10px;
+  color: #cf222e;
+  font-size: 13px;
+}
+
+.cloud-sync-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cloud-sync-confirm__actions button {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #ffffff;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cloud-sync-confirm__delete {
+  border-color: #cf222e !important;
+  background: #cf222e !important;
+  color: #ffffff !important;
+}
+
+.cloud-sync-share__url {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #f6f8fa;
+  color: #1f2328;
+  font-size: 13px;
+  word-break: break-all;
 }

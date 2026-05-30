@@ -81,10 +81,15 @@ pub(crate) fn cos_object_key_for_file(meta: &FileMeta) -> String {
 }
 
 fn is_missing_cos_object_error(error: &str) -> bool {
-    error.contains("NoSuchKey")
-        || error.contains("NotFound")
-        || error.contains("not found")
-        || error.contains("404")
+    // Match case-insensitively so we catch both the structured error code
+    // (e.g. "code=NoSuchKey") surfaced by `format_sdk_error` and any
+    // lower/upper-case variants that show up in the source chain.
+    let lower = error.to_ascii_lowercase();
+    lower.contains("nosuchkey")
+        || lower.contains("notfound")
+        || lower.contains("not found")
+        || lower.contains("404")
+        || lower.contains("no such key")
 }
 
 async fn download_manifest(cos_client: &CosClient) -> Result<Manifest, String> {
@@ -243,7 +248,7 @@ impl SyncEngine {
     pub fn enable_cloud_sync(
         &mut self,
         cos_client: CosClient,
-        _app_handle: AppHandle,
+        app_handle: AppHandle,
     ) -> Result<(), String> {
         self.stop();
 
@@ -252,6 +257,11 @@ impl SyncEngine {
         self.conn_monitor = Arc::new(ConnectivityMonitor::new(cos_client));
         self.cloud_sync_enabled = true;
         self.enqueue_local_files_for_sync()?;
+
+        // Kick off background tasks (connectivity monitor, manifest polling,
+        // upload-queue processing). Without this the engine only ever syncs
+        // on an explicit "manual sync" and `is_online()` stays false.
+        self.start(app_handle);
 
         Ok(())
     }
@@ -1406,6 +1416,33 @@ mod tests {
     use super::*;
     use crate::cos_client::CosClient;
     use crate::models::{CosConfig, FileMeta, Manifest, ManifestEntry, SyncStatus};
+
+    #[test]
+    fn is_missing_cos_object_error_detects_structured_codes() {
+        // The shape produced by `format_sdk_error` for a missing object.
+        assert!(is_missing_cos_object_error(
+            "COS get_object(excalidraw/manifest.json) failed [code=NoSuchKey]: service error"
+        ));
+        assert!(is_missing_cos_object_error(
+            "COS head_object(x) failed [code=NotFound]: ..."
+        ));
+        // HTTP-status fallbacks and case-insensitive variants.
+        assert!(is_missing_cos_object_error("got a 404 from server"));
+        assert!(is_missing_cos_object_error("error: nosuchkey"));
+        assert!(is_missing_cos_object_error("No Such Key"));
+    }
+
+    #[test]
+    fn is_missing_cos_object_error_ignores_real_failures() {
+        assert!(!is_missing_cos_object_error(
+            "COS get_object(x) failed [code=AccessDenied]: 403"
+        ));
+        assert!(!is_missing_cos_object_error(
+            "COS get_object(x) failed [code=RequestTimeout]: timed out"
+        ));
+        assert!(!is_missing_cos_object_error("connection reset by peer"));
+    }
+
 
     /// Helper to build a valid CosConfig for constructing test dependencies.
     fn test_cos_config() -> CosConfig {

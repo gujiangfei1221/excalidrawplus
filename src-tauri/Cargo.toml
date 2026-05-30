@@ -35,6 +35,10 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Tencent COS via S3-compatible API
 aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
+# Provides DisplayErrorContext + ProvideErrorMetadata so we can surface the
+# structured COS/S3 error code (e.g. "NoSuchKey") instead of a flattened
+# Display string that drops it.
+aws-smithy-types = "1"
 
 # Hashing for content-hash computation
 sha2 = "0.10"

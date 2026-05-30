@@ -63,6 +63,8 @@ export const cloudSyncBridge = {
   triggerSync: () => invoke<void>("trigger_sync"),
   getSyncStatus: (fileId: string) =>
     invoke<SyncStatus>("get_sync_status", { fileId }),
+  uploadShareImage: (fileId: string, imageData: number[]) =>
+    invoke<string>("upload_share_image", { fileId, imageData }),
 };
 
 export const listenToCloudSyncEvent = async <T>(

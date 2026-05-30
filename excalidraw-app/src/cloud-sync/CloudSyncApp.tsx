@@ -2,6 +2,7 @@ import {
   CaptureUpdateAction,
   Excalidraw,
   ExcalidrawAPIProvider,
+  exportToBlob,
   restoreAppState,
   restoreElements,
   serializeAsJSON,
@@ -115,6 +116,9 @@ const CloudSyncEditor = ({
   const [deletingFileIds, setDeletingFileIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const [shareUrl, setShareUrl] = useState<string | null>(null);
+  const [isSharing, setIsSharing] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
   const hasUnsavedChangesRef = useRef(false);
   const latestCanvasRef = useRef(JSON.stringify(EMPTY_CANVAS));
   const draftCanvasByFileIdRef = useRef(new Map<string, string>());
@@ -242,6 +246,12 @@ const CloudSyncEditor = ({
     try {
       const rawCanvas = await cloudSyncBridge.downloadCanvas(activeFileId);
       const canvas = parseCanvas(rawCanvas);
+      // Update the ref BEFORE updateScene so that the onChange callback
+      // sees the new content as "current" and won't mark it as unsaved.
+      latestCanvasRef.current = rawCanvas;
+      draftCanvasByFileIdRef.current.delete(activeFileId);
+      hasUnsavedChangesRef.current = false;
+      setHasUnsavedChanges(false);
       excalidrawAPI?.updateScene({
         elements: restoreElements(canvas.elements || [], null, {
           repairBindings: true,
@@ -253,10 +263,6 @@ const CloudSyncEditor = ({
       if (canvas.files) {
         excalidrawAPI?.addFiles(Object.values(canvas.files) as any);
       }
-      latestCanvasRef.current = rawCanvas;
-      draftCanvasByFileIdRef.current.delete(activeFileId);
-      hasUnsavedChangesRef.current = false;
-      setHasUnsavedChanges(false);
       setStatus("synced");
       setLastSyncTime(Date.now());
       await refreshFiles();
@@ -587,6 +593,44 @@ const CloudSyncEditor = ({
   const activeConflictCount = activeFileId
     ? countConflictCopies(files, activeFileId)
     : 0;
+
+  const shareAsImage = useCallback(async () => {
+    if (!excalidrawAPI || !activeFileId || isSharing) {
+      return;
+    }
+
+    setIsSharing(true);
+    setError("");
+
+    try {
+      const elements = excalidrawAPI.getSceneElements();
+      const appState = excalidrawAPI.getAppState();
+      const binaryFiles = excalidrawAPI.getFiles();
+
+      const blob = await exportToBlob({
+        elements,
+        appState: {
+          ...appState,
+          exportBackground: true,
+        },
+        files: binaryFiles,
+        mimeType: "image/png",
+      });
+
+      const arrayBuffer = await blob.arrayBuffer();
+      const imageData = Array.from(new Uint8Array(arrayBuffer));
+
+      const url = await cloudSyncBridge.uploadShareImage(
+        activeFileId,
+        imageData,
+      );
+      setShareUrl(url);
+    } catch (err: any) {
+      setError(err.message || "分享失败");
+    } finally {
+      setIsSharing(false);
+    }
+  }, [excalidrawAPI, activeFileId, isSharing]);
   const displayFiles = useMemo(
     () =>
       files.map((file) =>
@@ -630,8 +674,8 @@ const CloudSyncEditor = ({
             >
               {isCloudSyncEnabled
                 ? isManualSyncing
-                  ? "同步中..."
-                  : "手动同步"
+                  ? "Push 中..."
+                  : "Push 推送"
                 : "同步云端"}
             </button>
             {isCloudSyncEnabled && activeFileId && (
@@ -642,7 +686,16 @@ const CloudSyncEditor = ({
                 onClick={() => void downloadActiveCanvas()}
                 type="button"
               >
-                下载云端
+                Pull 拉取
+              </button>
+            )}
+            {isCloudSyncEnabled && activeFileId && (
+              <button
+                disabled={isSharing || !excalidrawAPI}
+                onClick={() => void shareAsImage()}
+                type="button"
+              >
+                {isSharing ? "分享中..." : "分享"}
               </button>
             )}
           </div>
@@ -670,6 +723,49 @@ const CloudSyncEditor = ({
             onChange={handleChange}
           />
         </div>
+        {shareUrl && (
+          <div
+            aria-labelledby="cloud-sync-share-title"
+            aria-modal="true"
+            className="cloud-sync-confirm"
+            role="dialog"
+          >
+            <div className="cloud-sync-confirm__panel">
+              <strong id="cloud-sync-share-title">分享链接</strong>
+              <p className="cloud-sync-confirm__message">
+                图片已上传，复制以下链接即可分享：
+              </p>
+              <input
+                className="cloud-sync-share__url"
+                onClick={(e) => (e.target as HTMLInputElement).select()}
+                readOnly
+                value={shareUrl}
+              />
+              <div className="cloud-sync-confirm__actions">
+                <button
+                  className="cloud-sync-confirm__cancel"
+                  onClick={() => {
+                    setShareUrl(null);
+                    setIsCopied(false);
+                  }}
+                  type="button"
+                >
+                  关闭
+                </button>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(shareUrl);
+                    setIsCopied(true);
+                    setTimeout(() => setIsCopied(false), 2000);
+                  }}
+                  type="button"
+                >
+                  {isCopied ? "已复制 ✓" : "复制链接"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

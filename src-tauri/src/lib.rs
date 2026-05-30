@@ -51,6 +51,7 @@ pub fn run() {
             commands::get_file_list,
             commands::trigger_sync,
             commands::get_sync_status,
+            commands::upload_share_image,
             commands::log_frontend_error,
         ])
         .run(tauri::generate_context!())
@@ -79,7 +80,12 @@ fn setup_cloud_sync(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
         sync_engine.set_cloud_sync_enabled(has_cos_config);
 
         if has_cos_config {
-            tracing::info!("COS config found, manual sync is ready");
+            // A valid config was persisted on a previous run — start the
+            // background tasks (connectivity monitor, manifest polling,
+            // upload-queue processing) immediately so sync works without the
+            // user having to re-save their config.
+            sync_engine.start(app.handle().clone());
+            tracing::info!("COS config found, background sync started");
         } else {
             tracing::info!("no COS config found, starting in disconnected mode");
         }

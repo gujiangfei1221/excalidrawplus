@@ -123,4 +123,100 @@ describe("FileListSidebar", () => {
     expect(status).toHaveTextContent("");
     expect(status).toHaveClass("cloud-sync-file__status", "is-pending-sync");
   });
+
+  it("does not delete immediately but shows a confirmation dialog", () => {
+    const onFileDelete = vi.fn();
+    render(
+      <FileListSidebar
+        activeFileId="new"
+        files={files}
+        isCollapsed={false}
+        onFileDelete={onFileDelete}
+        onFileImport={() => {}}
+        onFileRename={() => {}}
+        onFileSelect={() => {}}
+        onNewFile={() => {}}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("删除 New file"));
+
+    expect(onFileDelete).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      screen.getByText(/同时删除云端 COS 上的文件/),
+    ).toBeInTheDocument();
+  });
+
+  it("cancels deletion without invoking the delete callback", () => {
+    const onFileDelete = vi.fn();
+    render(
+      <FileListSidebar
+        activeFileId="new"
+        files={files}
+        isCollapsed={false}
+        onFileDelete={onFileDelete}
+        onFileImport={() => {}}
+        onFileRename={() => {}}
+        onFileSelect={() => {}}
+        onNewFile={() => {}}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("删除 New file"));
+    fireEvent.click(screen.getByText("取消"));
+
+    expect(onFileDelete).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("deletes the file only after confirming in the dialog", () => {
+    const onFileDelete = vi.fn();
+    render(
+      <FileListSidebar
+        activeFileId="new"
+        files={files}
+        isCollapsed={false}
+        onFileDelete={onFileDelete}
+        onFileImport={() => {}}
+        onFileRename={() => {}}
+        onFileSelect={() => {}}
+        onNewFile={() => {}}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("删除 New file"));
+    fireEvent.click(screen.getByText("确认删除"));
+
+    expect(onFileDelete).toHaveBeenCalledTimes(1);
+    expect(onFileDelete).toHaveBeenCalledWith("new");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("hides the cloud deletion warning when cloud sync is disabled", () => {
+    render(
+      <FileListSidebar
+        activeFileId="new"
+        files={files}
+        isCloudSyncEnabled={false}
+        isCollapsed={false}
+        onFileDelete={() => {}}
+        onFileImport={() => {}}
+        onFileRename={() => {}}
+        onFileSelect={() => {}}
+        onNewFile={() => {}}
+        onToggleCollapse={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("删除 New file"));
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/同时删除云端 COS 上的文件/),
+    ).not.toBeInTheDocument();
+  });
 });

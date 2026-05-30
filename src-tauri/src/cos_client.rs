@@ -18,9 +18,11 @@
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::{
     config::{Credentials, Region},
+    error::ProvideErrorMetadata,
     primitives::ByteStream,
     Client,
 };
+use aws_smithy_types::error::display::DisplayErrorContext;
 use tracing::{debug, info, warn};
 
 use crate::models::CosConfig;
@@ -28,6 +30,25 @@ use crate::models::CosConfig;
 /// Provider name reported to the AWS credential chain. Purely informational
 /// — the SDK uses it in error messages and tracing spans.
 const CREDENTIALS_PROVIDER_NAME: &str = "tencent-cos";
+
+/// Render an `aws-sdk-s3` error into a string that preserves the structured
+/// error code (e.g. `NoSuchKey`, `NotFound`, `403`) along with the full
+/// source chain.
+///
+/// The SDK's `Display` impl only renders the top-level "service error"
+/// message and drops the underlying S3 error code, which the sync engine
+/// relies on to distinguish "object does not exist" (a normal first-sync
+/// condition) from genuine network/permission failures. We therefore pull
+/// the code out of the error metadata and also append the full
+/// `DisplayErrorContext` chain so logs remain debuggable.
+pub(crate) fn format_sdk_error<E>(operation: &str, error: E) -> String
+where
+    E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
+{
+    let code = error.code().unwrap_or("Unknown");
+    let context = DisplayErrorContext(&error);
+    format!("{operation} failed [code={code}]: {context}")
+}
 
 /// Lightweight metadata returned by [`CosClient::head_object`].
 ///
@@ -113,7 +134,7 @@ impl CosClient {
             .body(ByteStream::from(body))
             .send()
             .await
-            .map_err(|e| format!("COS put_object({key}) failed: {e}"))?;
+            .map_err(|e| format_sdk_error(&format!("COS put_object({key})"), e))?;
         Ok(())
     }
 
@@ -126,7 +147,7 @@ impl CosClient {
             .key(key)
             .send()
             .await
-            .map_err(|e| format!("COS get_object({key}) failed: {e}"))?;
+            .map_err(|e| format_sdk_error(&format!("COS get_object({key})"), e))?;
 
         let bytes = resp
             .body
@@ -148,7 +169,7 @@ impl CosClient {
             .key(key)
             .send()
             .await
-            .map_err(|e| format!("COS delete_object({key}) failed: {e}"))?;
+            .map_err(|e| format_sdk_error(&format!("COS delete_object({key})"), e))?;
         Ok(())
     }
 
@@ -162,7 +183,7 @@ impl CosClient {
             .key(key)
             .send()
             .await
-            .map_err(|e| format!("COS head_object({key}) failed: {e}"))?;
+            .map_err(|e| format_sdk_error(&format!("COS head_object({key})"), e))?;
 
         Ok(ObjectMetadata {
             content_length: resp.content_length(),
@@ -190,8 +211,9 @@ impl CosClient {
             .send()
             .await
             .map_err(|e| {
-                warn!(bucket = %self.bucket, error = %e, "COS connection test failed");
-                format!("COS test_connection failed: {e}")
+                let formatted = format_sdk_error("COS test_connection", e);
+                warn!(bucket = %self.bucket, error = %formatted, "COS connection test failed");
+                formatted
             })?;
         info!(bucket = %self.bucket, "COS connection test succeeded");
         Ok(true)

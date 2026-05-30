@@ -915,6 +915,55 @@ pub async fn get_sync_status(
     Ok(meta.sync_status)
 }
 
+/// Upload a canvas snapshot as a PNG image to COS and return a public URL.
+///
+/// Steps:
+/// 1. Verify cloud sync is enabled (COS client is configured).
+/// 2. Read the COS config from the database to obtain the region.
+/// 3. Build the object key: `excalidraw/shares/{file_id}-{timestamp_ms}.png`
+/// 4. Upload the image bytes via `cos_client.put_object`.
+/// 5. Return the public URL for the uploaded image.
+#[tauri::command]
+pub async fn upload_share_image(
+    file_id: String,
+    image_data: Vec<u8>,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    info!(file_id = %file_id, "upload_share_image requested");
+
+    let engine = state.sync_engine.lock().await;
+
+    if !engine.is_cloud_sync_enabled() {
+        return Err("云同步未启用，请先配置 COS".to_string());
+    }
+
+    let cos_config = engine
+        .db
+        .get_cos_config()
+        .map_err(|e| format!("Failed to read COS config: {e}"))?
+        .ok_or_else(|| "COS 配置不存在".to_string())?;
+
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+
+    let key = format!("excalidraw/shares/{file_id}-{timestamp_ms}.png");
+
+    engine
+        .cos_client
+        .put_object(&key, image_data)
+        .await
+        .map_err(|e| format!("上传分享图片失败: {e}"))?;
+
+    let bucket = engine.cos_client.bucket();
+    let region = &cos_config.region;
+    let url = format!("https://{bucket}.cos.{region}.myqcloud.com/{key}");
+
+    info!(file_id = %file_id, url = %url, "upload_share_image completed");
+    Ok(url)
+}
+
 #[tauri::command]
 pub async fn log_frontend_error(
     message: String,
