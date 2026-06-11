@@ -17,7 +17,11 @@ import {
   useState,
 } from "react";
 
-import type { AppState, BinaryFiles } from "@excalidraw/excalidraw/types";
+import type {
+  AppState,
+  BinaryFiles,
+  ExcalidrawImperativeAPI,
+} from "@excalidraw/excalidraw/types";
 import type { OrderedExcalidrawElement } from "@excalidraw/element/types";
 
 import { CosConfigForm } from "./components/CosConfigForm";
@@ -61,6 +65,71 @@ const parseCanvas = (rawCanvas: string) => {
 const restoreCanvasAppState = (appState: Record<string, unknown> = {}) => {
   const { collaborators, ...rest } = appState;
   return restoreAppState(rest, null);
+};
+
+const restoreCanvasElements = (elements: unknown) => {
+  return restoreElements(elements || [], null, {
+    repairBindings: true,
+    deleteInvisibleElements: true,
+  });
+};
+
+const applyCanvasToEditor = (
+  excalidrawAPI: ExcalidrawImperativeAPI,
+  canvas: ReturnType<typeof parseCanvas>,
+  options?: { scrollToFitContent?: boolean },
+) => {
+  const elements = restoreCanvasElements(canvas.elements);
+  excalidrawAPI.updateScene({
+    elements,
+    appState: restoreCanvasAppState(canvas.appState),
+    captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+  });
+  if (canvas.files) {
+    excalidrawAPI.addFiles(Object.values(canvas.files) as any);
+  }
+  if (options?.scrollToFitContent && elements.length > 0) {
+    excalidrawAPI.scrollToContent(undefined, {
+      fitToContent: true,
+      animate: false,
+    });
+  }
+};
+
+const ToolbarIcon = ({
+  name,
+}: {
+  name: "cloud-download" | "cloud-upload" | "share";
+}) => {
+  // Icons sourced from Lucide (https://lucide.dev) — MIT licensed.
+  switch (name) {
+    case "cloud-download":
+      return (
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M12 13v8" />
+          <path d="m8 17 4 4 4-4" />
+          <path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29" />
+        </svg>
+      );
+    case "cloud-upload":
+      return (
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M12 13V5" />
+          <path d="m8 9 4-4 4 4" />
+          <path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29" />
+        </svg>
+      );
+    case "share":
+      return (
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <circle cx="18" cy="5" r="3" />
+          <circle cx="6" cy="12" r="3" />
+          <circle cx="18" cy="19" r="3" />
+          <path d="m8.59 13.51 6.83 3.98" />
+          <path d="m15.41 6.51-6.82 3.98" />
+        </svg>
+      );
+  }
 };
 
 class CloudSyncErrorBoundary extends Component<
@@ -252,17 +321,10 @@ const CloudSyncEditor = ({
       draftCanvasByFileIdRef.current.delete(activeFileId);
       hasUnsavedChangesRef.current = false;
       setHasUnsavedChanges(false);
-      excalidrawAPI?.updateScene({
-        elements: restoreElements(canvas.elements || [], null, {
-          repairBindings: true,
-          deleteInvisibleElements: true,
-        }),
-        appState: restoreCanvasAppState(canvas.appState),
-        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
-      });
-      if (canvas.files) {
-        excalidrawAPI?.addFiles(Object.values(canvas.files) as any);
-      }
+      excalidrawAPI &&
+        applyCanvasToEditor(excalidrawAPI, canvas, {
+          scrollToFitContent: true,
+        });
       setStatus("synced");
       setLastSyncTime(Date.now());
       await refreshFiles();
@@ -377,17 +439,7 @@ const CloudSyncEditor = ({
     const draftCanvas = draftCanvasByFileIdRef.current.get(activeFileId);
     if (draftCanvas) {
       const canvas = parseCanvas(draftCanvas);
-      excalidrawAPI.updateScene({
-        elements: restoreElements(canvas.elements || [], null, {
-          repairBindings: true,
-          deleteInvisibleElements: true,
-        }),
-        appState: restoreCanvasAppState(canvas.appState),
-        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
-      });
-      if (canvas.files) {
-        excalidrawAPI.addFiles(Object.values(canvas.files) as any);
-      }
+      applyCanvasToEditor(excalidrawAPI, canvas);
       latestCanvasRef.current = draftCanvas;
       hasUnsavedChangesRef.current = true;
       setHasUnsavedChanges(true);
@@ -399,17 +451,9 @@ const CloudSyncEditor = ({
       .loadCanvas(activeFileId)
       .then((rawCanvas) => {
         const canvas = parseCanvas(rawCanvas);
-        excalidrawAPI.updateScene({
-          elements: restoreElements(canvas.elements || [], null, {
-            repairBindings: true,
-            deleteInvisibleElements: true,
-          }),
-          appState: restoreCanvasAppState(canvas.appState),
-          captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+        applyCanvasToEditor(excalidrawAPI, canvas, {
+          scrollToFitContent: true,
         });
-        if (canvas.files) {
-          excalidrawAPI.addFiles(Object.values(canvas.files) as any);
-        }
         latestCanvasRef.current = rawCanvas;
         hasUnsavedChangesRef.current = false;
         setHasUnsavedChanges(false);
@@ -665,37 +709,56 @@ const CloudSyncEditor = ({
           />
           <div className="cloud-sync-toolbar__actions">
             <button
+              aria-busy={isManualSyncing}
+              aria-label={
+                isCloudSyncEnabled
+                  ? isManualSyncing
+                    ? "Push 中..."
+                    : "Push 推送"
+                  : "同步云端"
+              }
+              className="cloud-sync-icon-button"
               disabled={
                 isCloudSyncEnabled &&
                 (isManualSyncing || isSavingToCloud || isDownloadingToLocal)
               }
               onClick={() => void syncToCloud()}
+              title={
+                isCloudSyncEnabled
+                  ? isManualSyncing
+                    ? "Push 中..."
+                    : "Push 推送"
+                  : "同步云端"
+              }
               type="button"
             >
-              {isCloudSyncEnabled
-                ? isManualSyncing
-                  ? "Push 中..."
-                  : "Push 推送"
-                : "同步云端"}
+              <ToolbarIcon name="cloud-upload" />
             </button>
             {isCloudSyncEnabled && activeFileId && (
               <button
+                aria-label="Pull 拉取"
+                className="cloud-sync-icon-button"
                 disabled={
                   isManualSyncing || isSavingToCloud || isDownloadingToLocal
                 }
                 onClick={() => void downloadActiveCanvas()}
+                title="Pull 拉取"
                 type="button"
               >
-                Pull 拉取
+                <ToolbarIcon name="cloud-download" />
               </button>
             )}
             {isCloudSyncEnabled && activeFileId && (
               <button
+                aria-busy={isSharing}
+                aria-label={isSharing ? "分享中..." : "分享"}
+                className="cloud-sync-icon-button"
                 disabled={isSharing || !excalidrawAPI}
                 onClick={() => void shareAsImage()}
+                title={isSharing ? "分享中..." : "分享"}
                 type="button"
               >
-                {isSharing ? "分享中..." : "分享"}
+                <ToolbarIcon name="share" />
               </button>
             )}
           </div>

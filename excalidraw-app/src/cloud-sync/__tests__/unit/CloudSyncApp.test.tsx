@@ -25,6 +25,7 @@ const excalidrawMocks = vi.hoisted(() => ({
   onChange: undefined as
     | ((elements: [], appState: {}, binaryFiles: {}) => void)
     | undefined,
+  scrollToContent: vi.fn(),
   shouldThrow: false,
   triggerOnUpdate: false,
   updateScene: vi.fn(),
@@ -54,6 +55,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
   serializeAsJSON: () => "{}",
   useExcalidrawAPI: () => ({
     addFiles: excalidrawMocks.addFiles,
+    scrollToContent: excalidrawMocks.scrollToContent,
     updateScene: excalidrawMocks.updateScene,
   }),
 }));
