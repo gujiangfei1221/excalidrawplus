@@ -22,7 +22,10 @@ import type {
   BinaryFiles,
   ExcalidrawImperativeAPI,
 } from "@excalidraw/excalidraw/types";
-import type { OrderedExcalidrawElement } from "@excalidraw/element/types";
+import type {
+  ExcalidrawElement,
+  OrderedExcalidrawElement,
+} from "@excalidraw/element/types";
 
 import { CosConfigForm } from "./components/CosConfigForm";
 import { FileListSidebar } from "./components/FileListSidebar";
@@ -37,7 +40,16 @@ import type { ReactNode } from "react";
 
 import type { CosConfig, FileEntry, SyncStatus } from "./types";
 
-const EMPTY_CANVAS = {
+type ParsedCanvas = {
+  type?: string;
+  version?: number;
+  source?: string;
+  elements?: readonly ExcalidrawElement[];
+  appState?: Record<string, unknown>;
+  files?: BinaryFiles;
+};
+
+const EMPTY_CANVAS: ParsedCanvas = {
   type: "excalidraw",
   version: 2,
   source: "cloud-sync-desktop",
@@ -54,9 +66,9 @@ const serializeCanvas = (
   return serializeAsJSON(elements, appState, files, "local");
 };
 
-const parseCanvas = (rawCanvas: string) => {
+const parseCanvas = (rawCanvas: string): ParsedCanvas => {
   try {
-    return JSON.parse(rawCanvas || JSON.stringify(EMPTY_CANVAS));
+    return JSON.parse(rawCanvas || JSON.stringify(EMPTY_CANVAS)) as ParsedCanvas;
   } catch {
     return EMPTY_CANVAS;
   }
@@ -67,8 +79,10 @@ const restoreCanvasAppState = (appState: Record<string, unknown> = {}) => {
   return restoreAppState(rest, null);
 };
 
-const restoreCanvasElements = (elements: unknown) => {
-  return restoreElements(elements || [], null, {
+const restoreCanvasElements = (
+  elements: readonly ExcalidrawElement[] | undefined,
+) => {
+  return restoreElements(elements ?? [], null, {
     repairBindings: true,
     deleteInvisibleElements: true,
   });
